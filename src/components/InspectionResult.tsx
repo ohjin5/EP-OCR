@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
   CheckCircle2,
   AlertTriangle,
@@ -14,17 +14,28 @@ import {
   Crop,
   CheckSquare,
   Square,
-  Filter,
-  Layers,
+  Undo2,
+  Save,
+  RefreshCw,
+  AlertCircle,
+  Plus,
+  Trash2,
+  Info,
 } from "lucide-react";
-import { InspectionResult as IInspectionResult } from "../types/api";
+import {
+  InspectionResult as IInspectionResult,
+  EditableOcrCode,
+  CodeStatus,
+} from "../types/api";
 import { ResultCodeList } from "./ResultCodeList";
 import { formatKoreanDate } from "../utils/dateUtils";
 import {
   extractCandidateCodes,
+  normalizeCode,
+  recalculateCodeList,
   compareCandidateCodes,
 } from "../utils/codeExtractor";
-import { getModels } from "../services/appsScriptApi";
+import { getModels, finalizeInspection } from "../services/appsScriptApi";
 
 interface InspectionResultProps {
   result: IInspectionResult;
@@ -33,6 +44,42 @@ interface InspectionResultProps {
   onReinspectSamePhoto: () => void;
   onViewReferenceData: () => void;
 }
+
+const STATUS_BADGE_CONFIG: Record<
+  CodeStatus,
+  { label: string; bg: string; text: string; border: string }
+> = {
+  matched: {
+    label: "기준 일치",
+    bg: "bg-emerald-100",
+    text: "text-emerald-800 font-bold",
+    border: "border-emerald-300",
+  },
+  unmatched: {
+    label: "기준 없음",
+    bg: "bg-amber-100",
+    text: "text-amber-800 font-bold",
+    border: "border-amber-300",
+  },
+  duplicate: {
+    label: "중복",
+    bg: "bg-purple-100",
+    text: "text-purple-800 font-bold",
+    border: "border-purple-300",
+  },
+  empty: {
+    label: "빈 값",
+    bg: "bg-slate-100",
+    text: "text-slate-500 font-medium",
+    border: "border-slate-300",
+  },
+  excluded: {
+    label: "제외됨",
+    bg: "bg-slate-100",
+    text: "text-slate-400 font-normal line-through",
+    border: "border-slate-200",
+  },
+};
 
 export const InspectionResult: React.FC<InspectionResultProps> = ({
   result,
@@ -48,26 +95,39 @@ export const InspectionResult: React.FC<InspectionResultProps> = ({
   const [refModels, setRefModels] = useState<string[]>([]);
   const [isLoadingRefModels, setIsLoadingRefModels] = useState<boolean>(true);
 
-  // Extracted candidates & Checkbox selection state
+  // Finalize / Save state
+  const [isSaved, setIsSaved] = useState<boolean>(false);
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [saveStatusMessage, setSaveStatusMessage] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
+
+  // Extract raw candidate strings from OCR text
   const rawCandidates = useMemo(() => {
-    // 1. First extract candidates from OCR text using strict code extractor
-    const candidates = extractCandidateCodes(result.ocrText);
-    // 2. Combine with server returned matched & extra if any were missed
-    const combined = new Set([...candidates, ...result.matched, ...result.extra]);
+    const extracted = extractCandidateCodes(result.ocrText);
+    const combined = new Set([...extracted, ...result.matched, ...result.extra]);
     return Array.from(combined);
   }, [result.ocrText, result.matched, result.extra]);
 
-  // Checked candidates Set (default: ALL checked)
-  const [checkedCandidates, setCheckedCandidates] = useState<Set<string>>(
-    new Set(rawCandidates)
-  );
+  // Initial editable items list state
+  const [codeItems, setCodeItems] = useState<EditableOcrCode[]>([]);
 
-  // Sync checked candidates if rawCandidates changes
+  // Initialize code items when rawCandidates change
   useEffect(() => {
-    setCheckedCandidates(new Set(rawCandidates));
+    const initialItems: EditableOcrCode[] = rawCandidates.map((cand, idx) => ({
+      id: `item-${idx}-${cand}`,
+      originalValue: cand,
+      editedValue: cand,
+      normalizedValue: normalizeCode(cand),
+      selected: true,
+      status: "unmatched",
+    }));
+    setCodeItems(initialItems);
+    setIsSaved(false);
   }, [rawCandidates]);
 
-  // Fetch reference models for the current sheet to support dynamic live re-comparison
+  // Fetch reference models for the current sheet
   useEffect(() => {
     let isMounted = true;
     async function fetchRef() {
@@ -77,7 +137,7 @@ export const InspectionResult: React.FC<InspectionResultProps> = ({
         const models = await getModels(result.sheetName);
         if (isMounted) setRefModels(models);
       } catch (err) {
-        console.error("Failed to load reference models for re-comparison:", err);
+        console.error("Failed to load reference models:", err);
       } finally {
         if (isMounted) setIsLoadingRefModels(false);
       }
@@ -88,18 +148,29 @@ export const InspectionResult: React.FC<InspectionResultProps> = ({
     };
   }, [result.sheetName]);
 
-  // Dynamically calculate comparison based on checked candidate codes
-  const computedComparison = useMemo(() => {
-    const activeCandidates = rawCandidates.filter((cand) =>
-      checkedCandidates.has(cand)
-    );
+  // Recalculate code items' statuses whenever codeItems or refModels change
+  const processedCodeItems = useMemo(() => {
+    return recalculateCodeList(codeItems, refModels);
+  }, [codeItems, refModels]);
 
-    // If reference models loaded, perform strict comparison
+  // Compute overall comparison verdict & counts dynamically
+  const computedComparison = useMemo(() => {
+    // Collect active, non-empty, non-duplicate selected candidate strings for comparison
+    const activeCandidates = processedCodeItems
+      .filter(
+        (item) =>
+          item.selected &&
+          item.status !== "empty" &&
+          item.status !== "excluded" &&
+          item.status !== "duplicate"
+      )
+      .map((item) => item.editedValue);
+
     if (refModels.length > 0) {
       return compareCandidateCodes(activeCandidates, refModels);
     }
 
-    // Fallback using initial server response if reference models haven't loaded
+    // Fallback using server initial response
     return {
       verdict: result.verdict,
       matched: result.matched,
@@ -110,27 +181,169 @@ export const InspectionResult: React.FC<InspectionResultProps> = ({
       missingCount: result.missingCount,
       referenceCount: result.referenceCount,
     };
-  }, [rawCandidates, checkedCandidates, refModels, result]);
+  }, [processedCodeItems, refModels, result]);
 
-  // Toggle individual code check status
-  const handleToggleCode = (code: string) => {
-    const next = new Set(checkedCandidates);
-    if (next.has(code)) {
-      next.delete(code);
-    } else {
-      next.add(code);
-    }
-    setCheckedCandidates(next);
+  // Handle single code input change
+  const handleItemValueChange = (id: string, newValue: string) => {
+    setCodeItems((prev) =>
+      prev.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              editedValue: newValue,
+              normalizedValue: normalizeCode(newValue),
+            }
+          : item
+      )
+    );
+    setIsSaved(false);
+    setSaveStatusMessage(null);
   };
 
-  // Toggle select all / unselect all
-  const handleToggleSelectAll = () => {
-    if (checkedCandidates.size === rawCandidates.length) {
-      setCheckedCandidates(new Set());
-    } else {
-      setCheckedCandidates(new Set(rawCandidates));
+  // Toggle single item checkbox
+  const handleItemToggleSelect = (id: string) => {
+    setCodeItems((prev) =>
+      prev.map((item) =>
+        item.id === id ? { ...item, selected: !item.selected } : item
+      )
+    );
+    setIsSaved(false);
+    setSaveStatusMessage(null);
+  };
+
+  // Restore single item to originalValue
+  const handleRestoreItem = (id: string) => {
+    setCodeItems((prev) =>
+      prev.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              editedValue: item.originalValue,
+              normalizedValue: normalizeCode(item.originalValue),
+            }
+          : item
+      )
+    );
+    setIsSaved(false);
+    setSaveStatusMessage(null);
+  };
+
+  // Add new blank candidate code row
+  const handleAddCodeRow = () => {
+    const newId = `new-item-${Date.now()}`;
+    const newItem: EditableOcrCode = {
+      id: newId,
+      originalValue: "",
+      editedValue: "",
+      normalizedValue: "",
+      selected: true,
+      status: "empty",
+    };
+    setCodeItems((prev) => [...prev, newItem]);
+    setIsSaved(false);
+  };
+
+  // Delete candidate row
+  const handleDeleteCodeRow = (id: string) => {
+    setCodeItems((prev) => prev.filter((item) => item.id !== id));
+    setIsSaved(false);
+  };
+
+  // Bulk action: Restore ALL to original values
+  const handleRestoreAll = () => {
+    setCodeItems((prev) =>
+      prev.map((item) => ({
+        ...item,
+        editedValue: item.originalValue,
+        normalizedValue: normalizeCode(item.originalValue),
+        selected: true,
+      }))
+    );
+    setIsSaved(false);
+    setSaveStatusMessage(null);
+  };
+
+  // Bulk action: Select ALL
+  const handleSelectAll = () => {
+    setCodeItems((prev) => prev.map((item) => ({ ...item, selected: true })));
+    setIsSaved(false);
+    setSaveStatusMessage(null);
+  };
+
+  // Bulk action: Unselect ALL
+  const handleUnselectAll = () => {
+    setCodeItems((prev) => prev.map((item) => ({ ...item, selected: false })));
+    setIsSaved(false);
+    setSaveStatusMessage(null);
+  };
+
+  // Force Refresh Comparison
+  const handleRefreshComparison = () => {
+    setCodeItems((prev) => [...prev]);
+    setSaveStatusMessage({
+      type: "success",
+      text: "수정된 내용을 바탕으로 실시간 판정이 다시 계산되었습니다.",
+    });
+    setTimeout(() => setSaveStatusMessage(null), 3000);
+  };
+
+  // Finalize Inspection & Save to Google Sheet
+  const handleFinalizeInspection = async () => {
+    setIsSaving(true);
+    setSaveStatusMessage(null);
+
+    const activeEditedCodes = processedCodeItems
+      .filter(
+        (item) =>
+          item.selected &&
+          item.status !== "empty" &&
+          item.status !== "excluded"
+      )
+      .map((item) => item.editedValue);
+
+    try {
+      const res = await finalizeInspection({
+        historyId: result.historyId,
+        sheetName: result.sheetName,
+        editedCodes: activeEditedCodes,
+        matched: computedComparison.matched,
+        missing: computedComparison.missing,
+        verdict: computedComparison.verdict,
+      });
+
+      if (res.success) {
+        setIsSaved(true);
+        setSaveStatusMessage({
+          type: "success",
+          text: "최종 검수 결과가 Google Sheet 이력에 저장되었습니다.",
+        });
+      } else {
+        setSaveStatusMessage({
+          type: "error",
+          text: res.message || "최종 검수 이력 저장에 실패했습니다.",
+        });
+      }
+    } catch (err) {
+      console.error("Failed to finalize inspection:", err);
+      setSaveStatusMessage({
+        type: "error",
+        text:
+          err instanceof Error
+            ? err.message
+            : "서버 통신 오류로 확정에 실패했습니다.",
+      });
+    } finally {
+      setIsSaving(false);
     }
   };
+
+  const hasDuplicateCodes = processedCodeItems.some(
+    (item) => item.status === "duplicate"
+  );
+
+  const hasValidSelectedCodes = processedCodeItems.some(
+    (item) => item.selected && item.status !== "empty" && item.status !== "excluded"
+  );
 
   const verdictConfig = {
     일치: {
@@ -139,7 +352,7 @@ export const InspectionResult: React.FC<InspectionResultProps> = ({
       icon: CheckCircle2,
       iconColor: "text-emerald-600",
       title: "기준 데이터와 완벽히 일치합니다",
-      subtitle: "체크된 모든 모델 코드가 검증되었습니다.",
+      subtitle: "선택된 모든 모델 코드가 검증되었습니다.",
     },
     부분일치: {
       bg: "bg-amber-50 border-amber-200 text-amber-950",
@@ -155,7 +368,7 @@ export const InspectionResult: React.FC<InspectionResultProps> = ({
       icon: XCircle,
       iconColor: "text-rose-600",
       title: "기준 모델을 확인하지 못했습니다",
-      subtitle: "선택된 품목코드 후보 중 기준 데이터와 일치하는 코드가 없습니다.",
+      subtitle: "선택된 품목코드 중 기준 데이터와 일치하는 코드가 없습니다.",
     },
   };
 
@@ -172,6 +385,34 @@ export const InspectionResult: React.FC<InspectionResultProps> = ({
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 my-4 px-2 sm:px-0">
+      {/* Save Notification Banner */}
+      <div
+        className={`p-3.5 sm:p-4 rounded-2xl border flex items-center justify-between gap-3 text-xs sm:text-sm font-semibold transition-all ${
+          isSaved
+            ? "bg-emerald-50 border-emerald-200 text-emerald-900 shadow-2xs"
+            : "bg-amber-50 border-amber-200 text-amber-900 shadow-2xs"
+        }`}
+      >
+        <div className="flex items-center gap-2.5">
+          {isSaved ? (
+            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+          ) : (
+            <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 animate-pulse" />
+          )}
+          <span>
+            {isSaved
+              ? "최종 검수 결과가 저장되었습니다."
+              : "수정 내용은 아직 저장되지 않았습니다. 검수 완료 후 [최종 검수 확정] 버튼을 눌러주세요."}
+          </span>
+        </div>
+
+        {isSaved && (
+          <span className="px-2.5 py-1 bg-emerald-600 text-white font-bold text-[11px] rounded-lg shrink-0">
+            저장완료
+          </span>
+        )}
+      </div>
+
       {/* Verdict Card */}
       <div className={`p-5 sm:p-6 rounded-2xl border shadow-xs transition-all ${currentVerdict.bg}`}>
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -257,84 +498,234 @@ export const InspectionResult: React.FC<InspectionResultProps> = ({
         </div>
       </div>
 
-      {/* Extracted Candidate Codes Checklist ("추출 코드 확인") */}
-      <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+      {/* Extracted Code Editable Form Section ("추출 코드 확인 및 검수 조정") */}
+      <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-4">
+        {/* Header & Bulk Actions */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-100 pb-3">
           <div>
-            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <CheckSquare className="w-4 h-4 text-teal-600" />
+            <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <CheckSquare className="w-5 h-5 text-teal-600" />
               추출 코드 확인 및 검수 조정
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              OCR로 인식된 품목코드 후보입니다. 오인식된 노이즈 항목의 체크를 해제하면 실시간으로 최종 판정이 다시 계산됩니다.
+              OCR로 추출된 품목코드를 직접 수정, 체크 해제 또는 복원할 수 있습니다. 입력 변경 시 실시간으로 판정이 재계산됩니다.
             </p>
           </div>
 
-          <button
-            onClick={handleToggleSelectAll}
-            className="self-start sm:self-auto text-xs px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl transition-colors flex items-center gap-1.5"
-          >
-            {checkedCandidates.size === rawCandidates.length ? (
-              <>
-                <Square className="w-3.5 h-3.5" />
-                <span>전체 해제</span>
-              </>
-            ) : (
-              <>
-                <CheckSquare className="w-3.5 h-3.5 text-teal-600" />
-                <span>전체 선택 ({rawCandidates.length}개)</span>
-              </>
-            )}
-          </button>
+          <div className="flex flex-wrap items-center gap-1.5 self-start md:self-auto">
+            <button
+              onClick={handleRestoreAll}
+              className="text-xs px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl transition-colors flex items-center gap-1"
+              title="모든 항목을 OCR 원본 값으로 복원합니다"
+            >
+              <Undo2 className="w-3.5 h-3.5" />
+              <span>전체 원본 복원</span>
+            </button>
+
+            <button
+              onClick={handleSelectAll}
+              className="text-xs px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl transition-colors flex items-center gap-1"
+            >
+              <CheckSquare className="w-3.5 h-3.5 text-teal-600" />
+              <span>전체 선택</span>
+            </button>
+
+            <button
+              onClick={handleUnselectAll}
+              className="text-xs px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl transition-colors flex items-center gap-1"
+            >
+              <Square className="w-3.5 h-3.5" />
+              <span>전체 해제</span>
+            </button>
+
+            <button
+              onClick={handleAddCodeRow}
+              className="text-xs px-2.5 py-1.5 bg-teal-50 hover:bg-teal-100 text-teal-700 font-semibold rounded-xl border border-teal-200 transition-colors flex items-center gap-1"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>코드 추가</span>
+            </button>
+          </div>
         </div>
 
-        {rawCandidates.length === 0 ? (
-          <div className="p-6 bg-slate-50 rounded-xl text-center text-xs text-slate-500">
-            OCR 결과에서 추출된 품목코드 형태의 문자열이 없습니다.
+        {/* Duplicate Notice Banner */}
+        {hasDuplicateCodes && (
+          <div className="bg-purple-50 border border-purple-200 p-3 rounded-xl flex items-start gap-2.5 text-xs text-purple-900">
+            <Info className="w-4 h-4 text-purple-600 shrink-0 mt-0.5" />
+            <p className="font-medium">
+              <span className="font-bold">동일 코드가 여러 번 인식되었습니다.</span>{" "}
+              중복 항목은 화면에 표시되나, 최종 검수 및 일치 개수에는 1건으로 자동 계산됩니다.
+            </p>
+          </div>
+        )}
+
+        {/* Status Message / Error Message Toast */}
+        {saveStatusMessage && (
+          <div
+            className={`p-3 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+              saveStatusMessage.type === "success"
+                ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                : "bg-rose-50 border-rose-200 text-rose-800"
+            }`}
+          >
+            {saveStatusMessage.type === "success" ? (
+              <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            )}
+            <span>{saveStatusMessage.text}</span>
+          </div>
+        )}
+
+        {/* Editable Items List */}
+        {processedCodeItems.length === 0 ? (
+          <div className="p-8 bg-slate-50 rounded-2xl text-center text-xs text-slate-500 space-y-2">
+            <p>OCR 결과에서 추출된 품목코드가 없습니다.</p>
+            <button
+              onClick={handleAddCodeRow}
+              className="px-3 py-1.5 bg-teal-600 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              직접 품목코드 입력하기
+            </button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 pt-1">
-            {rawCandidates.map((code) => {
-              const isChecked = checkedCandidates.has(code);
-              const isMatched = computedComparison.matched.includes(code);
+          <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+            {processedCodeItems.map((item) => {
+              const badge = STATUS_BADGE_CONFIG[item.status];
+              const isEdited = item.editedValue !== item.originalValue;
 
               return (
                 <div
-                  key={code}
-                  onClick={() => handleToggleCode(code)}
-                  className={`p-2.5 rounded-xl border transition-all cursor-pointer select-none flex items-center justify-between gap-2 ${
-                    isChecked
-                      ? isMatched
-                        ? "bg-emerald-50/70 border-emerald-200 text-emerald-950 font-bold"
-                        : "bg-slate-50 border-slate-300 text-slate-900 font-semibold"
-                      : "bg-slate-50/50 border-slate-200 text-slate-400 line-through opacity-60"
+                  key={item.id}
+                  className={`p-2.5 sm:p-3 rounded-xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                    item.selected
+                      ? "bg-white border-slate-200 shadow-2xs"
+                      : "bg-slate-50 border-slate-200 opacity-60"
                   }`}
                 >
-                  <div className="flex items-center gap-2 font-mono text-xs overflow-hidden">
-                    {isChecked ? (
-                      <CheckSquare className="w-4 h-4 text-teal-600 shrink-0" />
-                    ) : (
-                      <Square className="w-4 h-4 text-slate-300 shrink-0" />
-                    )}
-                    <span className="truncate">{code}</span>
+                  <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                    {/* Checkbox */}
+                    <button
+                      onClick={() => handleItemToggleSelect(item.id)}
+                      className="p-1 text-slate-600 hover:text-teal-600 transition-colors shrink-0"
+                      title={item.selected ? "검수 대상에서 제외" : "검수 대상에 포함"}
+                    >
+                      {item.selected ? (
+                        <CheckSquare className="w-5 h-5 text-teal-600" />
+                      ) : (
+                        <Square className="w-5 h-5 text-slate-300" />
+                      )}
+                    </button>
+
+                    {/* Editable Input */}
+                    <div className="flex-1 min-w-0 flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={item.editedValue}
+                        onChange={(e) =>
+                          handleItemValueChange(item.id, e.target.value)
+                        }
+                        placeholder="품목코드 입력 (예: RSZ7300MCS)"
+                        className={`w-full px-3 py-1.5 text-xs sm:text-sm font-mono font-bold rounded-lg border transition-all focus:outline-hidden focus:ring-2 focus:ring-teal-500/50 ${
+                          item.selected
+                            ? "bg-slate-50 border-slate-300 text-slate-900 focus:bg-white"
+                            : "bg-slate-100 border-slate-200 text-slate-400 line-through"
+                        }`}
+                      />
+
+                      {/* Delete button for added rows or manual cleanup */}
+                      <button
+                        onClick={() => handleDeleteCodeRow(item.id)}
+                        className="p-1 text-slate-300 hover:text-rose-500 transition-colors shrink-0"
+                        title="항목 삭제"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
 
-                  {isChecked && (
+                  {/* Status Badge & Actions */}
+                  <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 border-t sm:border-t-0 pt-2 sm:pt-0 border-slate-100">
+                    {/* Original Value hint if edited */}
+                    {isEdited && item.originalValue && (
+                      <span className="text-[11px] text-slate-400 font-mono truncate max-w-[120px]">
+                        (원문: {item.originalValue})
+                      </span>
+                    )}
+
+                    {/* Status Badge */}
                     <span
-                      className={`text-[10px] px-2 py-0.5 rounded-md font-bold shrink-0 ${
-                        isMatched
-                          ? "bg-emerald-600 text-white"
-                          : "bg-amber-100 text-amber-800 border border-amber-200"
-                      }`}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] border shrink-0 ${badge.bg} ${badge.text} ${badge.border}`}
                     >
-                      {isMatched ? "기준일치" : "추가후보"}
+                      {badge.label}
                     </span>
-                  )}
+
+                    {/* Restore Button */}
+                    {isEdited && item.originalValue && (
+                      <button
+                        onClick={() => handleRestoreItem(item.id)}
+                        className="px-2 py-1 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg border border-slate-200 transition-colors flex items-center gap-1 shrink-0"
+                        title="OCR 원본 문자열로 복원"
+                      >
+                        <Undo2 className="w-3 h-3" />
+                        <span>원본 복원</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               );
             })}
           </div>
         )}
+
+        {/* Section Action Bar */}
+        <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="text-xs text-slate-500 font-medium">
+            총 {processedCodeItems.length}개 중{" "}
+            <span className="font-bold text-slate-800">
+              {
+                processedCodeItems.filter(
+                  (i) => i.selected && i.status !== "empty"
+                ).length
+              }
+              개 선택됨
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            <button
+              onClick={handleRefreshComparison}
+              className="flex-1 sm:flex-initial px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5"
+            >
+              <RefreshCw className="w-3.5 h-3.5 text-teal-600" />
+              <span>수정 내용 다시 비교</span>
+            </button>
+
+            <button
+              onClick={handleFinalizeInspection}
+              disabled={!hasValidSelectedCodes || isSaving}
+              className="flex-1 sm:flex-initial px-5 py-2 bg-teal-600 hover:bg-teal-500 text-white text-xs font-bold rounded-xl shadow-md shadow-teal-900/20 transition-all flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {isSaving ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>Google Sheet 저장 중...</span>
+                </>
+              ) : isSaved ? (
+                <>
+                  <Check className="w-4 h-4" />
+                  <span>최종 검수 확정 완료</span>
+                </>
+              ) : (
+                <>
+                  <Save className="w-4 h-4" />
+                  <span>최종 검수 확정</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Result Code Lists */}
@@ -419,7 +810,7 @@ export const InspectionResult: React.FC<InspectionResultProps> = ({
           className="flex-1 py-3 px-4 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold text-sm shadow-sm transition-colors flex items-center justify-center gap-2"
         >
           <PlusCircle className="w-5 h-5" />
-          새 검수 시작 (기본 정보 유지)
+          새 사진 선택 (기본 정보 유지)
         </button>
 
         <button
@@ -427,7 +818,7 @@ export const InspectionResult: React.FC<InspectionResultProps> = ({
           className="flex-1 py-3 px-4 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-sm shadow-2xs transition-colors flex items-center justify-center gap-2"
         >
           <RotateCcw className="w-4 h-4" />
-          같은 사진 다시 검수
+          다시 OCR (같은 사진 재검수)
         </button>
 
         <button

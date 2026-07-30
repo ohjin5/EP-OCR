@@ -190,3 +190,46 @@ export function compareCandidateCodes(
     referenceCount,
   };
 }
+
+import { EditableOcrCode } from "../types/api";
+
+/**
+ * Recalculate status for each EditableOcrCode based on reference models and prior duplicates
+ */
+export function recalculateCodeList(
+  items: EditableOcrCode[],
+  referenceModels: string[]
+): EditableOcrCode[] {
+  const normRefMap = new Map<string, string>();
+  referenceModels.forEach((ref) => {
+    normRefMap.set(normalizeCode(ref), ref);
+  });
+
+  const seenSelectedNorms = new Set<string>();
+
+  return items.map((item) => {
+    if (!item.selected) {
+      return { ...item, status: "excluded" };
+    }
+
+    const trimmed = item.editedValue.trim();
+    if (!trimmed) {
+      return { ...item, status: "empty" };
+    }
+
+    const norm = normalizeCode(trimmed);
+
+    // Duplicate check among selected non-empty items
+    if (seenSelectedNorms.has(norm)) {
+      return { ...item, normalizedValue: norm, status: "duplicate" };
+    }
+
+    seenSelectedNorms.add(norm);
+
+    if (normRefMap.has(norm)) {
+      return { ...item, normalizedValue: norm, status: "matched" };
+    } else {
+      return { ...item, normalizedValue: norm, status: "unmatched" };
+    }
+  });
+}

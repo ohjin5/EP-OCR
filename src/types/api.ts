@@ -116,3 +116,28 @@ export interface UpdateHistoryResponse {
   success: boolean;
   message?: string;
 }
+
+export interface FinalizeInspectionRequest {
+  historyId: string;
+  sheetName: string;
+  editedCodes: string[];
+  matched: string[];
+  missing: string[];
+  verdict: InspectionVerdict;
+}
+
+export interface FinalizeInspectionResponse {
+  success: boolean;
+  message?: string;
+}
+
+export type CodeStatus = "matched" | "unmatched" | "duplicate" | "empty" | "excluded";
+
+export interface EditableOcrCode {
+  id: string;
+  originalValue: string;
+  editedValue: string;
+  normalizedValue: string;
+  selected: boolean;
+  status: CodeStatus;
+}

@@ -1,4 +1,6 @@
 import {
+  FinalizeInspectionRequest,
+  FinalizeInspectionResponse,
   HealthCheckResponse,
   HistoryApiResponse,
   HistoryItem,
@@ -203,4 +205,42 @@ export async function updateHistoryRecord(req: UpdateHistoryRequest): Promise<Up
   );
 
   return res;
+}
+
+/**
+  * 8. Finalize Inspection Record with Edited Codes
+  */
+export async function finalizeInspection(
+  req: FinalizeInspectionRequest
+): Promise<FinalizeInspectionResponse> {
+  const payload = {
+    action: "finalizeInspection",
+    historyId: req.historyId,
+    sheetName: req.sheetName,
+    editedCodes: req.editedCodes,
+    matched: req.matched,
+    missing: req.missing,
+    verdict: req.verdict,
+  };
+
+  try {
+    const res = await fetchWithTimeout<FinalizeInspectionResponse>(
+      APPS_SCRIPT_URL,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8",
+        },
+        body: JSON.stringify(payload),
+      },
+      30000
+    );
+    return res;
+  } catch (err) {
+    console.error("finalizeInspection error:", err);
+    return {
+      success: false,
+      message: err instanceof Error ? err.message : "최종 검수 확정 요청 실패",
+    };
+  }
 }
