@@ -1,0 +1,10 @@
+{
+  "name": "AI OCR 코드 자동 검수",
+  "description": "실시간 모바일 및 데스크톱 카메라/사진 OCR 물품 코드 자동 검수 시스템",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
