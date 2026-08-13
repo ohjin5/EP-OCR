@@ -6,11 +6,11 @@ interface InspectionProgressProps {
 }
 
 const STEPS = [
-  "이미지 최적화 중...",
-  "OCR 서버로 전송 중...",
-  "문서 텍스트 인식 중...",
-  "기준 모델 코드 자동 비교 중...",
-  "검수 이력 저장 중...",
+  "선택 영역 이미지 최적화 중",
+  "OCR 서버로 전송 중",
+  "문자 인식 중",
+  "전체 기준 모델 검색 중",
+  "결과 정리 중",
 ];
 
 export const InspectionProgress: React.FC<InspectionProgressProps> = ({ onCancel }) => {
@@ -23,10 +23,10 @@ export const InspectionProgress: React.FC<InspectionProgressProps> = ({ onCancel
       setElapsedSeconds((s) => s + 1);
     }, 1000);
 
-    // Step progression simulation for UI feedback while waiting for single Apps Script response
+    // Step progression simulation for UI feedback
     const stepTimerId = setInterval(() => {
       setCurrentStepIndex((prev) => (prev < STEPS.length - 1 ? prev + 1 : prev));
-    }, 4500);
+    }, 3000);
 
     return () => {
       clearInterval(timerId);
@@ -43,7 +43,7 @@ export const InspectionProgress: React.FC<InspectionProgressProps> = ({ onCancel
         <div>
           <h3 className="text-lg font-bold text-slate-900">AI OCR 검수 진행 중</h3>
           <p className="text-xs text-slate-500">
-            Apps Script API를 통해 모델 코드를 분석하고 있습니다. ({elapsedSeconds}초 경과)
+            OCR 결과와 전체 기준 모델 데이터를 비교하고 있습니다. ({elapsedSeconds}초 경과)
           </p>
         </div>
       </div>

@@ -1,6 +1,6 @@
 export type ApiHealthStatus = "checking" | "connected" | "error";
 
-export type InspectionVerdict = "일치" | "부분일치" | "불일치";
+export type InspectionVerdict = "일치" | "확인 필요" | "불일치" | "OCR 인식 실패" | "부분일치";
 
 export interface ProductGroup {
   sheetName: string;
@@ -20,13 +20,90 @@ export interface ReferenceRow {
   vendor: string;
 }
 
-export interface InspectionRequest {
-  base64Image: string;
-  mimeType: "image/jpeg";
+export interface ReferenceModel {
   sheetName: string;
+  rowNumber: number;
+  model: string;
+  itemCode: string;
+  itemName: string;
+  specification: string;
+  manufacturer: string;
+  ediCode: string;
+  vendor: string;
+}
+
+export interface IndexedReferenceModel extends ReferenceModel {
+  normalizedModel: string;
+}
+
+export interface ExactModelMatch {
+  type: "exact";
+  ocrCandidate: string;
+  reference: ReferenceModel;
+}
+
+export interface SimilarModelMatch {
+  type: "similar";
+  ocrCandidate: string;
+  reference: ReferenceModel;
+  distance: number;
+}
+
+export interface ModelMatchingResult {
+  exactMatches: ExactModelMatch[];
+  similarMatches: SimilarModelMatch[];
+  unmatchedCandidates: string[];
+}
+
+export interface AllReferenceRowsResponse {
+  success: boolean;
+  total?: number;
+  rows?: ReferenceModel[];
+  message?: string;
+}
+
+export interface OcrApiResponse {
+  success: boolean;
+  ocrText?: string;
+  textLength?: number;
+  message?: string;
+}
+
+export interface SaveInspectionPayload {
+  action?: "saveInspection";
   vendor: string;
   surgeryDate: string;
   memo: string;
+  verdict: InspectionVerdict;
+  ocrText: string;
+  exactMatches: Array<{
+    sheetName: string;
+    model: string;
+    itemCode?: string;
+    itemName?: string;
+    specification?: string;
+  }>;
+  similarMatches: Array<{
+    sheetName: string;
+    model: string;
+    ocrCandidate: string;
+  }>;
+  unmatchedCandidates: string[];
+}
+
+export interface SaveInspectionResponse {
+  success: boolean;
+  message?: string;
+  historyId?: string;
+}
+
+export interface InspectionRequest {
+  base64Image: string;
+  mimeType: "image/jpeg";
+  sheetName?: string;
+  vendor?: string;
+  surgeryDate?: string;
+  memo?: string;
 }
 
 export interface InspectionResult {
@@ -45,6 +122,10 @@ export interface InspectionResult {
   textLength: number;
   historyId: string;
   inspectedAt: string;
+  exactMatches?: ExactModelMatch[];
+  similarMatches?: SimilarModelMatch[];
+  unmatchedCandidates?: string[];
+  candidateCount?: number;
 }
 
 export interface HistoryItem {

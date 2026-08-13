@@ -1,4 +1,5 @@
 import {
+  AllReferenceRowsResponse,
   FinalizeInspectionRequest,
   FinalizeInspectionResponse,
   HealthCheckResponse,
@@ -7,10 +8,14 @@ import {
   InspectionApiResponse,
   InspectionRequest,
   ModelsResponse,
+  OcrApiResponse,
   ProductGroup,
   ProductGroupsResponse,
+  ReferenceModel,
   ReferenceRow,
   ReferenceRowsResponse,
+  SaveInspectionPayload,
+  SaveInspectionResponse,
   UpdateHistoryRequest,
   UpdateHistoryResponse,
 } from "../types/api";
@@ -85,7 +90,120 @@ export async function getProductGroups(): Promise<ProductGroup[]> {
 }
 
 /**
- * 3. Get Reference Models List
+ * 3. Get ALL Reference Rows Across All Sheets
+ * Action: GET ?action=allReferenceRows
+ */
+export async function getAllReferenceRows(): Promise<{
+  total: number;
+  rows: ReferenceModel[];
+}> {
+  const url = `${APPS_SCRIPT_URL}?action=allReferenceRows`;
+  const res = await fetchWithTimeout<AllReferenceRowsResponse>(url, { method: "GET" }, 45000);
+  if (!res.success) {
+    throw new Error(res.message || "전체 기준 데이터를 불러오지 못했습니다.");
+  }
+  return {
+    total: res.total || res.rows?.length || 0,
+    rows: res.rows || [],
+  };
+}
+
+/**
+ * 4. Run Single OCR on Cropped Base64 Image
+ * Action: POST { action: "ocr", base64Image, mimeType: "image/jpeg" }
+ * Note: Does NOT send sheetName. Server returns ocrText & textLength.
+ */
+export async function runOcr(
+  base64Image: string,
+  mimeType = "image/jpeg",
+  signal?: AbortSignal
+): Promise<OcrApiResponse> {
+  const cleanBase64 = stripBase64Prefix(base64Image);
+
+  const payload = {
+    action: "ocr",
+    base64Image: cleanBase64,
+    mimeType,
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+  if (signal) {
+    signal.addEventListener("abort", () => controller.abort());
+  }
+
+  try {
+    const response = await fetch(APPS_SCRIPT_URL, {
+      method: "POST",
+      redirect: "follow",
+      headers: {
+        "Content-Type": "text/plain;charset=utf-8",
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`OCR 서버 응답 오류 (${response.status})`);
+    }
+
+    const data = (await response.json()) as OcrApiResponse;
+    return data;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error("OCR 분석 시간이 초과되었습니다 (90초). 다시 시도해 주세요.");
+    }
+    throw err;
+  }
+}
+
+/**
+ * 5. Save Inspection Result
+ * Action: POST { action: "saveInspection", vendor, surgeryDate, memo, verdict, ocrText, exactMatches, similarMatches, unmatchedCandidates }
+ */
+export async function saveInspection(
+  payload: SaveInspectionPayload
+): Promise<SaveInspectionResponse> {
+  const bodyData = {
+    action: "saveInspection",
+    vendor: payload.vendor || "",
+    surgeryDate: payload.surgeryDate || "",
+    memo: payload.memo || "",
+    verdict: payload.verdict,
+    ocrText: payload.ocrText || "",
+    exactMatches: payload.exactMatches || [],
+    similarMatches: payload.similarMatches || [],
+    unmatchedCandidates: payload.unmatchedCandidates || [],
+  };
+
+  try {
+    const res = await fetchWithTimeout<SaveInspectionResponse>(
+      APPS_SCRIPT_URL,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8",
+        },
+        body: JSON.stringify(bodyData),
+      },
+      30000
+    );
+    return res;
+  } catch (err) {
+    console.error("saveInspection error:", err);
+    return {
+      success: false,
+      message: err instanceof Error ? err.message : "검수 결과 저장 실패",
+    };
+  }
+}
+
+/**
+ * Legacy reference models list
  */
 export async function getModels(sheetName: string): Promise<string[]> {
   const encodedName = encodeURIComponent(sheetName);
@@ -98,7 +216,7 @@ export async function getModels(sheetName: string): Promise<string[]> {
 }
 
 /**
- * 4. Get Reference Rows Detailed Data
+ * Legacy reference rows for single sheet
  */
 export async function getReferenceRows(sheetName: string): Promise<ReferenceRow[]> {
   const encodedName = encodeURIComponent(sheetName);
@@ -111,7 +229,7 @@ export async function getReferenceRows(sheetName: string): Promise<ReferenceRow[
 }
 
 /**
- * 5. Submit Image for OCR Inspection
+ * Legacy Inspect Image wrapper
  */
 export async function inspectImage(
   req: InspectionRequest,
@@ -123,14 +241,11 @@ export async function inspectImage(
     action: "inspect",
     base64Image: cleanBase64,
     mimeType: "image/jpeg",
-    sheetName: req.sheetName,
+    sheetName: req.sheetName || "",
     vendor: req.vendor || "",
     surgeryDate: req.surgeryDate || "",
     memo: req.memo || "",
   };
-
-  // Note: Never log full base64 to console
-  console.log(`[API] Submitting OCR inspection request for sheet: ${req.sheetName}, vendor: ${req.vendor}`);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
@@ -161,14 +276,14 @@ export async function inspectImage(
   } catch (err) {
     clearTimeout(timeoutId);
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error("OCR 검수 시간이 초과되었습니다 (90초). 인터넷 연결을 확인하고 다시 시도해 주세요.");
+      throw new Error("OCR 검수 시간이 초과되었습니다 (90초). 다시 시도해 주세요.");
     }
     throw err;
   }
 }
 
 /**
- * 6. Get Inspection History
+ * Get Inspection History
  */
 export async function getInspectionHistory(limit = 100): Promise<HistoryItem[]> {
   const url = `${APPS_SCRIPT_URL}?action=history&limit=${limit}`;
@@ -180,7 +295,7 @@ export async function getInspectionHistory(limit = 100): Promise<HistoryItem[]> 
 }
 
 /**
- * 7. Update History Record
+ * Update History Record
  */
 export async function updateHistoryRecord(req: UpdateHistoryRequest): Promise<UpdateHistoryResponse> {
   const payload = {
@@ -208,7 +323,7 @@ export async function updateHistoryRecord(req: UpdateHistoryRequest): Promise<Up
 }
 
 /**
-  * 8. Finalize Inspection Record with Edited Codes
+  * Finalize Inspection Record
   */
 export async function finalizeInspection(
   req: FinalizeInspectionRequest

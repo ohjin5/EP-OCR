@@ -1,39 +1,44 @@
 import React, { useRef, useState } from "react";
-import { Camera, Upload, AlertCircle, RefreshCw, Calendar, Building, FileText, CheckCircle } from "lucide-react";
-import { ProductGroup } from "../types/api";
+import {
+  Camera,
+  Upload,
+  AlertCircle,
+  RefreshCw,
+  Calendar,
+  Building,
+  FileText,
+  CheckCircle,
+  Database,
+} from "lucide-react";
 import { getTodayDateString } from "../utils/dateUtils";
 import { readFileAsDataUrl } from "../utils/imageUtils";
 
 interface InspectionFormProps {
-  productGroups: ProductGroup[];
-  isLoadingGroups: boolean;
-  groupError: string | null;
-  selectedGroup: string;
+  totalReferenceCount: number;
+  isLoadingReference: boolean;
+  referenceError: string | null;
   vendor: string;
   surgeryDate: string;
   memo: string;
-  onSelectGroup: (group: string) => void;
   onChangeVendor: (vendor: string) => void;
   onChangeSurgeryDate: (date: string) => void;
   onChangeMemo: (memo: string) => void;
-  onRetryLoadGroups: () => void;
+  onRetryLoadReference: () => void;
   onStartCamera: () => void;
   onFileSelected: (dataUrl: string) => void;
 }
 
 export const InspectionForm: React.FC<InspectionFormProps> = ({
-  productGroups,
-  isLoadingGroups,
-  groupError,
-  selectedGroup,
+  totalReferenceCount,
+  isLoadingReference,
+  referenceError,
   vendor,
   surgeryDate,
   memo,
-  onSelectGroup,
   onChangeVendor,
   onChangeSurgeryDate,
   onChangeMemo,
-  onRetryLoadGroups,
+  onRetryLoadReference,
   onStartCamera,
   onFileSelected,
 }) => {
@@ -45,7 +50,6 @@ export const InspectionForm: React.FC<InspectionFormProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Check for HEIC format warning
     if (file.name.toLowerCase().endsWith(".heic") || file.name.toLowerCase().endsWith(".heif")) {
       setFileError(
         "HEIC 형식은 브라우저에 따라 읽을 수 없을 수 있습니다. 카메라 설정에서 JPG로 전환하거나 다른 사진을 선택해 주세요."
@@ -62,7 +66,7 @@ export const InspectionForm: React.FC<InspectionFormProps> = ({
     }
   };
 
-  const selectedGroupInfo = productGroups.find((g) => g.sheetName === selectedGroup);
+  const isFormDisabled = isLoadingReference || Boolean(referenceError);
 
   return (
     <div className="bg-white rounded-2xl p-5 sm:p-7 shadow-xs border border-slate-200 max-w-2xl mx-auto my-4 space-y-6">
@@ -71,53 +75,61 @@ export const InspectionForm: React.FC<InspectionFormProps> = ({
           <span>검수 조건 설정</span>
         </h2>
         <p className="text-xs text-slate-500 mt-1">
-          제품군과 수술/거래처 정보를 입력한 후 촬영을 시작해 주세요.
+          수술 및 거래처 정보를 입력하고 촬영 방식을 선택해 주세요.
         </p>
       </div>
 
-      {/* Product Group Dropdown */}
-      <div className="space-y-1.5">
-        <label htmlFor="productGroupSelect" className="block text-xs font-bold text-slate-700">
-          제품군 선택 <span className="text-rose-500">*</span>
+      {/* Reference Target Display (No product group dropdown) */}
+      <div className="space-y-2">
+        <label className="block text-xs font-bold text-slate-700">
+          비교 대상
         </label>
 
-        {isLoadingGroups ? (
-          <div className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-500">
-            <RefreshCw className="w-4 h-4 animate-spin text-teal-600" />
-            <span>제품군 목록을 불러오는 중입니다...</span>
-          </div>
-        ) : groupError ? (
-          <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-center justify-between text-xs text-rose-700">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{groupError}</span>
+        <div className="p-4 bg-teal-50/60 border border-teal-200/80 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="p-2.5 bg-teal-600 text-white rounded-xl shadow-xs shrink-0 mt-0.5 sm:mt-0">
+              <Database className="w-5 h-5" />
             </div>
-            <button
-              onClick={onRetryLoadGroups}
-              className="px-2.5 py-1 bg-white hover:bg-rose-100 text-rose-800 rounded-lg border border-rose-300 font-semibold transition-colors shrink-0"
-            >
-              다시 시도
-            </button>
+            <div>
+              <h3 className="text-sm font-bold text-teal-950 flex items-center gap-2">
+                <span>전체 기준데이터</span>
+              </h3>
+              <p className="text-xs text-teal-800 mt-0.5">
+                OCR로 인식한 모델 코드를 전체 기준데이터에서 자동으로 검색합니다.
+              </p>
+            </div>
           </div>
-        ) : (
-          <select
-            id="productGroupSelect"
-            value={selectedGroup}
-            onChange={(e) => onSelectGroup(e.target.value)}
-            className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 font-semibold focus:outline-none focus:ring-2 focus:ring-teal-500 focus:bg-white transition-all cursor-pointer"
-          >
-            {productGroups.map((group) => (
-              <option key={group.sheetName} value={group.sheetName}>
-                {group.displayName} (모델 {group.modelCount}개)
-              </option>
-            ))}
-          </select>
-        )}
 
-        {selectedGroupInfo && (
-          <div className="flex items-center gap-1.5 text-xs text-teal-700 font-medium pl-1">
-            <CheckCircle className="w-3.5 h-3.5" />
-            <span>선택된 제품군: {selectedGroupInfo.displayName} (기준 모델 {selectedGroupInfo.modelCount}개)</span>
+          <div className="shrink-0 self-start sm:self-auto">
+            {isLoadingReference ? (
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-teal-700 bg-white/80 px-3 py-1.5 rounded-xl border border-teal-200">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-teal-600" />
+                <span>기준데이터 불러오는 중...</span>
+              </div>
+            ) : referenceError ? (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-rose-700 font-semibold">로딩 실패</span>
+                <button
+                  type="button"
+                  onClick={onRetryLoadReference}
+                  className="px-2.5 py-1 bg-rose-600 text-white rounded-lg text-xs font-bold hover:bg-rose-700 transition-colors"
+                >
+                  다시 시도
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 text-xs font-bold text-teal-800 bg-teal-100/80 border border-teal-200 px-3 py-1.5 rounded-xl">
+                <CheckCircle className="w-4 h-4 text-teal-600 shrink-0" />
+                <span>전체 기준 모델 {totalReferenceCount}건 로드됨</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {referenceError && (
+          <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-center gap-2 text-xs text-rose-800">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{referenceError}</span>
           </div>
         )}
       </div>
@@ -193,8 +205,8 @@ export const InspectionForm: React.FC<InspectionFormProps> = ({
           <button
             type="button"
             onClick={onStartCamera}
-            disabled={!selectedGroup || isLoadingGroups}
-            className="py-4 px-5 rounded-2xl bg-teal-600 hover:bg-teal-700 active:scale-[0.98] text-white font-bold text-base shadow-md shadow-teal-900/10 transition-all flex items-center justify-center gap-3 disabled:opacity-50"
+            disabled={isFormDisabled}
+            className="py-4 px-5 rounded-2xl bg-teal-600 hover:bg-teal-700 active:scale-[0.98] text-white font-bold text-base shadow-md shadow-teal-900/10 transition-all flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Camera className="w-6 h-6" />
             <span>카메라로 실시간 촬영</span>
@@ -204,8 +216,8 @@ export const InspectionForm: React.FC<InspectionFormProps> = ({
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={!selectedGroup || isLoadingGroups}
-            className="py-4 px-5 rounded-2xl bg-slate-100 hover:bg-slate-200/80 active:scale-[0.98] text-slate-800 font-bold text-base border border-slate-300 shadow-2xs transition-all flex items-center justify-center gap-3 disabled:opacity-50"
+            disabled={isFormDisabled}
+            className="py-4 px-5 rounded-2xl bg-slate-100 hover:bg-slate-200/80 active:scale-[0.98] text-slate-800 font-bold text-base border border-slate-300 shadow-2xs transition-all flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Upload className="w-5 h-5 text-slate-600" />
             <span>사진 파일 선택</span>

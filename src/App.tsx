@@ -1,29 +1,40 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { AppHeader } from "./components/AppHeader";
 import { TabNavigation, TabType } from "./components/TabNavigation";
 import { InspectionForm } from "./components/InspectionForm";
 import { CameraScanner } from "./components/CameraScanner";
 import { ImageReviewEditor } from "./components/ImageReviewEditor";
 import { InspectionProgress } from "./components/InspectionProgress";
+import { OcrRecognitionReview } from "./components/OcrRecognitionReview";
 import { InspectionResult } from "./components/InspectionResult";
 import { ReferenceDataView } from "./components/ReferenceDataView";
 import { HistoryView } from "./components/HistoryView";
 
 import {
   ApiHealthStatus,
-  InspectionRequest,
+  ExactModelMatch,
   InspectionResult as IInspectionResult,
+  InspectionVerdict,
+  ModelMatchingResult,
   ProductGroup,
+  ReferenceModel,
+  SimilarModelMatch,
 } from "./types/api";
 import { CapturedImageInfo, ImageQualityResult } from "./types/inspection";
 import {
   checkHealth,
+  getAllReferenceRows,
   getProductGroups,
-  inspectImage,
+  runOcr,
+  saveInspection,
 } from "./services/appsScriptApi";
+import {
+  createModelIndex,
+  matchOcrTextWithReferences,
+} from "./utils/modelMatcher";
 import { getTodayDateString } from "./utils/dateUtils";
 import { getKoreanErrorMessage } from "./utils/errorUtils";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 
 export default function App() {
   // Global API Status State
@@ -33,35 +44,65 @@ export default function App() {
 
   // Product Groups State
   const [productGroups, setProductGroups] = useState<ProductGroup[]>([]);
-  const [isLoadingGroups, setIsLoadingGroups] = useState<boolean>(true);
-  const [groupError, setGroupError] = useState<string | null>(null);
+  const [selectedGroup, setSelectedGroup] = useState<string>("");
+
+  // Global Reference Rows & Model Index State
+  const [allReferenceRows, setAllReferenceRows] = useState<ReferenceModel[]>([]);
+  const [totalReferenceCount, setTotalReferenceCount] = useState<number>(0);
+  const [isLoadingReference, setIsLoadingReference] = useState<boolean>(true);
+  const [referenceError, setReferenceError] = useState<string | null>(null);
 
   // Active Tab
   const [activeTab, setActiveTab] = useState<TabType>("scan");
 
   // Form Field State
-  const [selectedGroup, setSelectedGroup] = useState<string>("");
   const [vendor, setVendor] = useState<string>("");
   const [surgeryDate, setSurgeryDate] = useState<string>(getTodayDateString());
   const [memo, setMemo] = useState<string>("");
 
-  // Scan & Inspect Process State
+  // Scan & Inspect Process State: form -> camera -> review -> inspecting -> ocr_review -> result
   const [scanState, setScanState] = useState<
-    "form" | "camera" | "review" | "inspecting" | "result"
+    "form" | "camera" | "review" | "inspecting" | "ocr_review" | "result"
   >("form");
 
-  // Image & Result State
+  // Image & OCR State
   const [rawCapturedDataUrl, setRawCapturedDataUrl] = useState<string>("");
   const [capturedQuality, setCapturedQuality] = useState<ImageQualityResult | undefined>(undefined);
   const [processedBase64, setProcessedBase64] = useState<string>("");
   const [processedDataUrl, setProcessedDataUrl] = useState<string>("");
+
+  // Intermediate OCR Match Result State
+  const [rawOcrText, setRawOcrText] = useState<string>("");
+  const [ocrMatchResult, setOcrMatchResult] = useState<ModelMatchingResult | null>(null);
+
+  // Final Inspection Result State
   const [inspectionResult, setInspectionResult] = useState<IInspectionResult | null>(null);
   const [inspectionError, setInspectionError] = useState<string | null>(null);
 
   // Abort controller for cancellation
   const [abortController, setAbortController] = useState<AbortController | null>(null);
 
-  // 1. Health check & Initial Product Groups fetch
+  // Build Map Index from Reference Models
+  const modelIndex = useMemo(() => {
+    return createModelIndex(allReferenceRows);
+  }, [allReferenceRows]);
+
+  // Load All Reference Data at Startup
+  const loadReferenceData = useCallback(async () => {
+    setIsLoadingReference(true);
+    setReferenceError(null);
+    try {
+      const res = await getAllReferenceRows();
+      setAllReferenceRows(res.rows);
+      setTotalReferenceCount(res.total);
+    } catch (err) {
+      setReferenceError(getKoreanErrorMessage(err));
+    } fontFinally: {
+      setIsLoadingReference(false);
+    }
+  }, []);
+
+  // 1. Health check & Initial Data Load
   const initializeApp = useCallback(async () => {
     setApiStatus("checking");
     setApiMessage("Apps Script API 연결 확인 중...");
@@ -76,25 +117,20 @@ export default function App() {
       setApiMessage(health.message || "Apps Script API 연결에 실패했습니다.");
     }
 
-    // Load Product Groups
-    await loadProductGroups();
-  }, []);
-
-  const loadProductGroups = async () => {
-    setIsLoadingGroups(true);
-    setGroupError(null);
+    // Load Product Groups for reference views
     try {
       const groups = await getProductGroups();
       setProductGroups(groups);
       if (groups.length > 0) {
-        setSelectedGroup((prev) => prev || groups[0].sheetName);
+        setSelectedGroup(groups[0].sheetName);
       }
-    } catch (err) {
-      setGroupError(getKoreanErrorMessage(err));
-    } finally {
-      setIsLoadingGroups(false);
+    } catch (e) {
+      console.warn("Product groups load fallback:", e);
     }
-  };
+
+    // Load All Reference Models across sheets
+    await loadReferenceData();
+  }, [loadReferenceData]);
 
   useEffect(() => {
     initializeApp();
@@ -118,10 +154,8 @@ export default function App() {
     alert(`카메라를 실행할 수 없습니다.\n(${errorMessage})\n\n사진 파일 선택 방식으로 전환합니다.`);
   };
 
-  // Submit Image to OCR Inspection
-  const handleStartInspection = async (finalBase64: string, finalDataUrl: string) => {
-    if (!selectedGroup) return;
-
+  // STEP 1: Submit ROI Cropped Image to OCR
+  const handleCropOcrConfirm = async (finalBase64: string, finalDataUrl: string) => {
     setProcessedBase64(finalBase64);
     setProcessedDataUrl(finalDataUrl);
     setScanState("inspecting");
@@ -130,33 +164,132 @@ export default function App() {
     const controller = new AbortController();
     setAbortController(controller);
 
-    const req: InspectionRequest = {
-      base64Image: finalBase64,
-      mimeType: "image/jpeg",
-      sheetName: selectedGroup,
-      vendor,
-      surgeryDate: surgeryDate || getTodayDateString(),
-      memo,
-    };
-
     try {
-      const res = await inspectImage(req, controller.signal);
-      if (res.success && res.result) {
-        setInspectionResult(res.result);
-        setScanState("result");
+      const res = await runOcr(finalBase64, "image/jpeg", controller.signal);
+      if (res.success && res.ocrText !== undefined) {
+        const text = res.ocrText || "";
+        setRawOcrText(text);
+
+        // Perform Client-side Model Comparison against ALL Reference Data
+        const matchResult = matchOcrTextWithReferences(text, modelIndex, allReferenceRows);
+        setOcrMatchResult(matchResult);
+
+        // Advance to OCR Recognition Review screen
+        setScanState("ocr_review");
       } else {
-        setInspectionError(res.message || "OCR 검수 처리 중 오류가 발생했습니다.");
+        setInspectionError(res.message || "OCR 분석 중 오류가 발생했습니다.");
         setScanState("form");
       }
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
-        setInspectionError("검수 요청이 취소되었습니다.");
+        setInspectionError("OCR 요청이 취소되었습니다.");
       } else {
         setInspectionError(getKoreanErrorMessage(err));
       }
       setScanState("form");
     } finally {
       setAbortController(null);
+    }
+  };
+
+  // STEP 2: Confirm OCR Review & Save Final Inspection Result
+  const handleOcrReviewConfirm = async (
+    confirmedExactMatches: ExactModelMatch[],
+    confirmedSimilarMatches: SimilarModelMatch[],
+    unmatched: string[],
+    verdict: InspectionVerdict
+  ) => {
+    setScanState("inspecting");
+
+    // Primary detected sheet name from matched models or fallback
+    const primarySheet =
+      confirmedExactMatches[0]?.reference.sheetName ||
+      confirmedSimilarMatches[0]?.reference.sheetName ||
+      "전체검수";
+
+    const exactPayload = confirmedExactMatches.map((m) => ({
+      sheetName: m.reference.sheetName,
+      model: m.reference.model,
+      itemCode: m.reference.itemCode,
+      itemName: m.reference.itemName,
+      specification: m.reference.specification,
+    }));
+
+    const similarPayload = confirmedSimilarMatches.map((m) => ({
+      sheetName: m.reference.sheetName,
+      model: m.reference.model,
+      ocrCandidate: m.ocrCandidate,
+    }));
+
+    const matchedModelsList = [
+      ...confirmedExactMatches.map((m) => m.reference.model),
+      ...confirmedSimilarMatches.map((m) => m.reference.model),
+    ];
+
+    try {
+      const saveRes = await saveInspection({
+        vendor,
+        surgeryDate: surgeryDate || getTodayDateString(),
+        memo,
+        verdict,
+        ocrText: rawOcrText,
+        exactMatches: exactPayload,
+        similarMatches: similarPayload,
+        unmatchedCandidates: unmatched,
+      });
+
+      const historyId = saveRes.historyId || `hist-${Date.now()}`;
+
+      // Construct final InspectionResult object for display
+      const finalResult: IInspectionResult = {
+        sheetName: primarySheet,
+        vendor,
+        surgeryDate: surgeryDate || getTodayDateString(),
+        verdict,
+        referenceCount: allReferenceRows.length,
+        matchedCount: matchedModelsList.length,
+        missingCount: 0,
+        extraCount: unmatched.length,
+        matched: matchedModelsList,
+        missing: [],
+        extra: unmatched,
+        ocrText: rawOcrText,
+        textLength: rawOcrText.length,
+        historyId,
+        inspectedAt: new Date().toISOString(),
+        exactMatches: confirmedExactMatches,
+        similarMatches: confirmedSimilarMatches,
+        unmatchedCandidates: unmatched,
+        candidateCount:
+          confirmedExactMatches.length +
+          confirmedSimilarMatches.length +
+          unmatched.length,
+      };
+
+      setInspectionResult(finalResult);
+      setScanState("result");
+    } catch (err) {
+      console.error("Save inspection error:", err);
+      // Even if save fails, display current inspection result to user
+      const finalResult: IInspectionResult = {
+        sheetName: primarySheet,
+        vendor,
+        surgeryDate: surgeryDate || getTodayDateString(),
+        verdict,
+        referenceCount: allReferenceRows.length,
+        matchedCount: matchedModelsList.length,
+        missingCount: 0,
+        extraCount: unmatched.length,
+        matched: matchedModelsList,
+        missing: [],
+        extra: unmatched,
+        ocrText: rawOcrText,
+        textLength: rawOcrText.length,
+        historyId: `hist-${Date.now()}`,
+        inspectedAt: new Date().toISOString(),
+      };
+      setInspectionResult(finalResult);
+      setScanState("result");
     }
   };
 
@@ -172,15 +305,17 @@ export default function App() {
     setRawCapturedDataUrl("");
     setProcessedBase64("");
     setProcessedDataUrl("");
+    setRawOcrText("");
+    setOcrMatchResult(null);
     setInspectionResult(null);
     setInspectionError(null);
-    setMemo(""); // clear memo, keep group, vendor, surgery date
+    setMemo(""); // Keep vendor and surgery date, reset memo
     setScanState("form");
   };
 
   const handleReinspectSamePhoto = () => {
     if (processedBase64) {
-      handleStartInspection(processedBase64, processedDataUrl);
+      handleCropOcrConfirm(processedBase64, processedDataUrl);
     }
   };
 
@@ -199,7 +334,7 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-5xl w-full mx-auto p-4 sm:p-6">
-        {/* Inspection Error Alert Banner if any */}
+        {/* Inspection Error Alert Banner */}
         {inspectionError && (
           <div className="mb-4 p-4 bg-rose-50 border border-rose-200 rounded-2xl flex items-center justify-between text-rose-800 text-xs sm:text-sm shadow-xs">
             <div className="flex items-center gap-2">
@@ -220,18 +355,16 @@ export default function App() {
           <div>
             {scanState === "form" && (
               <InspectionForm
-                productGroups={productGroups}
-                isLoadingGroups={isLoadingGroups}
-                groupError={groupError}
-                selectedGroup={selectedGroup}
+                totalReferenceCount={totalReferenceCount}
+                isLoadingReference={isLoadingReference}
+                referenceError={referenceError}
                 vendor={vendor}
                 surgeryDate={surgeryDate}
                 memo={memo}
-                onSelectGroup={setSelectedGroup}
                 onChangeVendor={setVendor}
                 onChangeSurgeryDate={setSurgeryDate}
                 onChangeMemo={setMemo}
-                onRetryLoadGroups={loadProductGroups}
+                onRetryLoadReference={loadReferenceData}
                 onStartCamera={() => setScanState("camera")}
                 onFileSelected={handleFileSelected}
               />
@@ -249,13 +382,26 @@ export default function App() {
               <ImageReviewEditor
                 initialDataUrl={rawCapturedDataUrl}
                 initialQuality={capturedQuality}
-                onConfirm={handleStartInspection}
+                onConfirm={handleCropOcrConfirm}
                 onRetake={() => setScanState("camera")}
               />
             )}
 
             {scanState === "inspecting" && (
               <InspectionProgress onCancel={handleCancelInspection} />
+            )}
+
+            {scanState === "ocr_review" && ocrMatchResult && (
+              <OcrRecognitionReview
+                ocrText={rawOcrText}
+                matchResult={ocrMatchResult}
+                vendor={vendor}
+                surgeryDate={surgeryDate}
+                memo={memo}
+                croppedDataUrl={processedDataUrl}
+                onConfirm={handleOcrReviewConfirm}
+                onRetakeOrRecrop={() => setScanState("review")}
+              />
             )}
 
             {scanState === "result" && inspectionResult && (
@@ -287,7 +433,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-400">
-        <p>AI OCR 물품 코드 자동 검수 시스템 • Google Apps Script 연동</p>
+        <p>AI OCR 물품 코드 자동 검수 시스템 • 전체 기준데이터 자동 매칭</p>
       </footer>
     </div>
   );
