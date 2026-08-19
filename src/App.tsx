@@ -19,6 +19,7 @@ import {
   ProductGroup,
   ReferenceModel,
   SimilarModelMatch,
+  InspectionTableRow,
 } from "./types/api";
 import { CapturedImageInfo, ImageQualityResult } from "./types/inspection";
 import {
@@ -65,7 +66,7 @@ export default function App() {
     "form" | "camera" | "review" | "inspecting" | "ocr_review" | "result"
   >("form");
 
-  // Image & OCR State
+  // Image & OCR State (Held in memory during the inspection session)
   const [rawCapturedDataUrl, setRawCapturedDataUrl] = useState<string>("");
   const [capturedQuality, setCapturedQuality] = useState<ImageQualityResult | undefined>(undefined);
   const [processedBase64, setProcessedBase64] = useState<string>("");
@@ -75,8 +76,9 @@ export default function App() {
   const [rawOcrText, setRawOcrText] = useState<string>("");
   const [ocrMatchResult, setOcrMatchResult] = useState<ModelMatchingResult | null>(null);
 
-  // Final Inspection Result State
+  // Final Inspection Result State & Table Rows
   const [inspectionResult, setInspectionResult] = useState<IInspectionResult | null>(null);
+  const [finalTableRows, setFinalTableRows] = useState<InspectionTableRow[]>([]);
   const [inspectionError, setInspectionError] = useState<string | null>(null);
 
   // Abort controller for cancellation
@@ -97,7 +99,7 @@ export default function App() {
       setTotalReferenceCount(res.total);
     } catch (err) {
       setReferenceError(getKoreanErrorMessage(err));
-    } fontFinally: {
+    } finally {
       setIsLoadingReference(false);
     }
   }, []);
@@ -197,15 +199,21 @@ export default function App() {
     confirmedExactMatches: ExactModelMatch[],
     confirmedSimilarMatches: SimilarModelMatch[],
     unmatched: string[],
-    verdict: InspectionVerdict
+    verdict: InspectionVerdict,
+    tableRows: InspectionTableRow[]
   ) => {
     setScanState("inspecting");
+    setFinalTableRows(tableRows);
 
     // Primary detected sheet name from matched models or fallback
     const primarySheet =
+      tableRows[0]?.sheetName ||
       confirmedExactMatches[0]?.reference.sheetName ||
       confirmedSimilarMatches[0]?.reference.sheetName ||
       "전체검수";
+
+    const matchedRows = tableRows.filter((r) => r.status === "matched");
+    const unmatchedRows = tableRows.filter((r) => r.status === "unmatched");
 
     const exactPayload = confirmedExactMatches.map((m) => ({
       sheetName: m.reference.sheetName,
@@ -221,11 +229,6 @@ export default function App() {
       ocrCandidate: m.ocrCandidate,
     }));
 
-    const matchedModelsList = [
-      ...confirmedExactMatches.map((m) => m.reference.model),
-      ...confirmedSimilarMatches.map((m) => m.reference.model),
-    ];
-
     try {
       const saveRes = await saveInspection({
         vendor,
@@ -233,6 +236,16 @@ export default function App() {
         memo,
         verdict,
         ocrText: rawOcrText,
+        sheetName: primarySheet,
+        inspectionRows: tableRows, // SINGLE SOURCE OF TRUTH
+        matched: matchedRows.map((r) => r.model),
+        missing: unmatchedRows.map((r) => r.model),
+        extra: unmatched,
+        matchedCount: matchedRows.length,
+        missingCount: unmatchedRows.length,
+        extraCount: unmatched.length,
+        referenceCount: tableRows.length,
+        totalCount: tableRows.length,
         exactMatches: exactPayload,
         similarMatches: similarPayload,
         unmatchedCandidates: unmatched,
@@ -246,24 +259,22 @@ export default function App() {
         vendor,
         surgeryDate: surgeryDate || getTodayDateString(),
         verdict,
-        referenceCount: allReferenceRows.length,
-        matchedCount: matchedModelsList.length,
-        missingCount: 0,
+        referenceCount: tableRows.length,
+        matchedCount: matchedRows.length,
+        missingCount: unmatchedRows.length,
         extraCount: unmatched.length,
-        matched: matchedModelsList,
-        missing: [],
+        matched: matchedRows.map((r) => r.model),
+        missing: unmatchedRows.map((r) => r.model),
         extra: unmatched,
         ocrText: rawOcrText,
         textLength: rawOcrText.length,
         historyId,
         inspectedAt: new Date().toISOString(),
+        inspectionRows: tableRows,
         exactMatches: confirmedExactMatches,
         similarMatches: confirmedSimilarMatches,
         unmatchedCandidates: unmatched,
-        candidateCount:
-          confirmedExactMatches.length +
-          confirmedSimilarMatches.length +
-          unmatched.length,
+        candidateCount: tableRows.length,
       };
 
       setInspectionResult(finalResult);
@@ -276,17 +287,18 @@ export default function App() {
         vendor,
         surgeryDate: surgeryDate || getTodayDateString(),
         verdict,
-        referenceCount: allReferenceRows.length,
-        matchedCount: matchedModelsList.length,
-        missingCount: 0,
+        referenceCount: tableRows.length,
+        matchedCount: matchedRows.length,
+        missingCount: unmatchedRows.length,
         extraCount: unmatched.length,
-        matched: matchedModelsList,
-        missing: [],
+        matched: matchedRows.map((r) => r.model),
+        missing: unmatchedRows.map((r) => r.model),
         extra: unmatched,
         ocrText: rawOcrText,
         textLength: rawOcrText.length,
         historyId: `hist-${Date.now()}`,
         inspectedAt: new Date().toISOString(),
+        inspectionRows: tableRows,
       };
       setInspectionResult(finalResult);
       setScanState("result");
@@ -308,6 +320,7 @@ export default function App() {
     setRawOcrText("");
     setOcrMatchResult(null);
     setInspectionResult(null);
+    setFinalTableRows([]);
     setInspectionError(null);
     setMemo(""); // Keep vendor and surgery date, reset memo
     setScanState("form");
@@ -320,7 +333,10 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans antialiased">
+    <div
+      className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans antialiased notranslate"
+      translate="no"
+    >
       {/* App Top Header */}
       <AppHeader
         apiStatus={apiStatus}
@@ -343,7 +359,7 @@ export default function App() {
             </div>
             <button
               onClick={() => setInspectionError(null)}
-              className="text-xs font-semibold px-2 py-1 bg-white hover:bg-rose-100 rounded-lg border border-rose-300 transition-colors"
+              className="text-xs font-semibold px-2 py-1 bg-white hover:bg-rose-100 rounded-lg border border-rose-300 transition-colors cursor-pointer"
             >
               닫기
             </button>
@@ -407,6 +423,7 @@ export default function App() {
             {scanState === "result" && inspectionResult && (
               <InspectionResult
                 result={inspectionResult}
+                tableRows={finalTableRows}
                 croppedDataUrl={processedDataUrl}
                 onNewInspection={handleNewInspection}
                 onReinspectSamePhoto={handleReinspectSamePhoto}
@@ -427,13 +444,16 @@ export default function App() {
 
         {/* TAB 3: 검수 이력 (Inspection History) */}
         {activeTab === "history" && (
-          <HistoryView productGroups={productGroups} />
+          <HistoryView
+            productGroups={productGroups}
+            allReferenceRows={allReferenceRows}
+          />
         )}
       </main>
 
       {/* Footer */}
       <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-400">
-        <p>AI OCR 물품 코드 자동 검수 시스템 • 전체 기준데이터 자동 매칭</p>
+        <p>AI OCR 물품 코드 자동 검수 시스템 • 기준데이터 자동 매칭</p>
       </footer>
     </div>
   );

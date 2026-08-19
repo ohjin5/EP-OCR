@@ -163,11 +163,20 @@ export async function runOcr(
 
 /**
  * 5. Save Inspection Result
- * Action: POST { action: "saveInspection", vendor, surgeryDate, memo, verdict, ocrText, exactMatches, similarMatches, unmatchedCandidates }
+ * Action: POST { action: "saveInspection", vendor, surgeryDate, memo, verdict, ocrText, inspectionRows, ... }
  */
 export async function saveInspection(
   payload: SaveInspectionPayload
 ): Promise<SaveInspectionResponse> {
+  const rows = payload.inspectionRows || [];
+  const matchedRows = rows.filter((r) => r.status === "matched");
+  const unmatchedRows = rows.filter((r) => r.status === "unmatched");
+
+  const primarySheet =
+    payload.sheetName ||
+    rows[0]?.sheetName ||
+    "전체검수";
+
   const bodyData = {
     action: "saveInspection",
     vendor: payload.vendor || "",
@@ -175,6 +184,20 @@ export async function saveInspection(
     memo: payload.memo || "",
     verdict: payload.verdict,
     ocrText: payload.ocrText || "",
+    sheetName: primarySheet,
+    // PRIMARY SINGLE SOURCE OF TRUTH:
+    inspectionRows: rows,
+    inspectionRowsJson: JSON.stringify(rows),
+    // Computed model lists and counts for sheet compatibility:
+    matched: matchedRows.map((r) => r.model),
+    missing: unmatchedRows.map((r) => r.model),
+    extra: payload.unmatchedCandidates || payload.extra || [],
+    matchedCount: matchedRows.length,
+    missingCount: unmatchedRows.length,
+    extraCount: (payload.unmatchedCandidates || payload.extra || []).length,
+    referenceCount: rows.length,
+    totalCount: rows.length,
+    // Retained for backward-compatibility with older Apps Script scripts:
     exactMatches: payload.exactMatches || [],
     similarMatches: payload.similarMatches || [],
     unmatchedCandidates: payload.unmatchedCandidates || [],
@@ -291,7 +314,24 @@ export async function getInspectionHistory(limit = 100): Promise<HistoryItem[]> 
   if (!res.success) {
     throw new Error(res.message || "검수 이력을 불러오지 못했습니다.");
   }
-  return res.history || [];
+  const rawList = res.history || [];
+  return rawList.map((item) => {
+    let parsedRows: any = item.inspectionRows;
+    if (typeof parsedRows === "string") {
+      try {
+        parsedRows = JSON.parse(parsedRows);
+      } catch {
+        parsedRows = undefined;
+      }
+    }
+    if (!Array.isArray(parsedRows)) {
+      parsedRows = undefined;
+    }
+    return {
+      ...item,
+      inspectionRows: parsedRows,
+    };
+  });
 }
 
 /**

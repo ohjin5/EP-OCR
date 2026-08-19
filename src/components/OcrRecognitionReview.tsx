@@ -1,27 +1,26 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import {
   CheckCircle2,
   AlertTriangle,
-  ChevronDown,
-  ChevronUp,
-  CheckSquare,
-  Square,
-  Save,
   RotateCcw,
-  Info,
   Check,
   Building,
-  Calendar,
   FileText,
-  Tag,
-  Package,
+  Maximize2,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import {
   ExactModelMatch,
   SimilarModelMatch,
   ModelMatchingResult,
   InspectionVerdict,
+  InspectionTableRow,
+  RESULT_LABELS,
+  MATCH_STATUS_LABEL,
 } from "../types/api";
+import { InspectionResultTable } from "./InspectionResultTable";
+import { OcrCropImageModal } from "./OcrCropImageModal";
 
 interface OcrRecognitionReviewProps {
   ocrText: string;
@@ -34,7 +33,8 @@ interface OcrRecognitionReviewProps {
     selectedExact: ExactModelMatch[],
     selectedSimilar: SimilarModelMatch[],
     unmatched: string[],
-    verdict: InspectionVerdict
+    verdict: InspectionVerdict,
+    tableRows: InspectionTableRow[]
   ) => void;
   onRetakeOrRecrop: () => void;
 }
@@ -49,7 +49,10 @@ export const OcrRecognitionReview: React.FC<OcrRecognitionReviewProps> = ({
   onConfirm,
   onRetakeOrRecrop,
 }) => {
-  // Checkbox state for exact matches (default: ALL checked)
+  // Modal state for viewing enlarged crop image
+  const [isImageModalOpen, setIsImageModalOpen] = useState<boolean>(false);
+
+  // Checkbox state for exact matches (default: all checked)
   const [selectedExactKeys, setSelectedExactKeys] = useState<Set<string>>(() => {
     const initial = new Set<string>();
     matchResult.exactMatches.forEach((m) => {
@@ -59,13 +62,18 @@ export const OcrRecognitionReview: React.FC<OcrRecognitionReviewProps> = ({
     return initial;
   });
 
-  // Checkbox state for similar matches (default: NONE checked, user must confirm)
-  const [selectedSimilarKeys, setSelectedSimilarKeys] = useState<Set<string>>(
-    new Set()
-  );
+  // Checkbox state for similar matches (default: all checked if distance is 1 or user can toggle)
+  const [selectedSimilarKeys, setSelectedSimilarKeys] = useState<Set<string>>(() => {
+    const initial = new Set<string>();
+    matchResult.similarMatches.forEach((m) => {
+      // By default, if distance is 1, let's pre-check or let user review
+      const key = `${m.reference.sheetName}-${m.reference.rowNumber}-${m.reference.model}-${m.ocrCandidate}`;
+      initial.add(key);
+    });
+    return initial;
+  });
 
-  // Accordion toggle state for unmatched strings
-  const [isUnmatchedOpen, setIsUnmatchedOpen] = useState<boolean>(false);
+  // Collapsible state for raw text
   const [isRawTextOpen, setIsRawTextOpen] = useState<boolean>(false);
 
   // Toggle exact match selection
@@ -94,30 +102,98 @@ export const OcrRecognitionReview: React.FC<OcrRecognitionReviewProps> = ({
     });
   };
 
-  // Compute selected exact and similar matches
-  const confirmedExactMatches = matchResult.exactMatches.filter((m) => {
-    const key = `${m.reference.sheetName}-${m.reference.rowNumber}-${m.reference.model}`;
-    return selectedExactKeys.has(key);
-  });
+  // Filter confirmed items
+  const confirmedExactMatches = useMemo(() => {
+    return matchResult.exactMatches.filter((m) => {
+      const key = `${m.reference.sheetName}-${m.reference.rowNumber}-${m.reference.model}`;
+      return selectedExactKeys.has(key);
+    });
+  }, [matchResult.exactMatches, selectedExactKeys]);
 
-  const confirmedSimilarMatches = matchResult.similarMatches.filter((m) => {
-    const key = `${m.reference.sheetName}-${m.reference.rowNumber}-${m.reference.model}-${m.ocrCandidate}`;
-    return selectedSimilarKeys.has(key);
-  });
+  const confirmedSimilarMatches = useMemo(() => {
+    return matchResult.similarMatches.filter((m) => {
+      const key = `${m.reference.sheetName}-${m.reference.rowNumber}-${m.reference.model}-${m.ocrCandidate}`;
+      return selectedSimilarKeys.has(key);
+    });
+  }, [matchResult.similarMatches, selectedSimilarKeys]);
 
-  // Calculate dynamic verdict
-  const totalConfirmed = confirmedExactMatches.length + confirmedSimilarMatches.length;
+  // Build unified InspectionTableRow[] for target items identified in this session
+  const tableRows: InspectionTableRow[] = useMemo(() => {
+    const rows: InspectionTableRow[] = [];
+
+    // 1. Exact Matches
+    matchResult.exactMatches.forEach((m) => {
+      const key = `${m.reference.sheetName}-${m.reference.rowNumber}-${m.reference.model}`;
+      const isSelected = selectedExactKeys.has(key);
+      rows.push({
+        sheetName: m.reference.sheetName,
+        model: m.reference.model,
+        itemName: m.reference.itemName || "-",
+        specification: m.reference.specification || "-",
+        itemCode: m.reference.itemCode || "-",
+        manufacturer: m.reference.manufacturer || "-",
+        ediCode: m.reference.ediCode || "-",
+        vendor: m.reference.vendor || vendor || "-",
+        status: isSelected ? "matched" : "unmatched",
+      });
+    });
+
+    // 2. Similar Matches
+    matchResult.similarMatches.forEach((m) => {
+      const key = `${m.reference.sheetName}-${m.reference.rowNumber}-${m.reference.model}-${m.ocrCandidate}`;
+      const isSelected = selectedSimilarKeys.has(key);
+      rows.push({
+        sheetName: m.reference.sheetName,
+        model: m.reference.model,
+        itemName: m.reference.itemName || "-",
+        specification: m.reference.specification || "-",
+        itemCode: m.reference.itemCode || "-",
+        manufacturer: m.reference.manufacturer || "-",
+        ediCode: m.reference.ediCode || "-",
+        vendor: m.reference.vendor || vendor || "-",
+        status: isSelected ? "matched" : "unmatched",
+      });
+    });
+
+    return rows;
+  }, [
+    matchResult.exactMatches,
+    matchResult.similarMatches,
+    selectedExactKeys,
+    selectedSimilarKeys,
+    vendor,
+  ]);
+
+  // Calculate dynamic overall verdict
+  const matchedRowsCount = tableRows.filter((r) => r.status === "matched").length;
   let dynamicVerdict: InspectionVerdict = "불일치";
 
   if (!ocrText || ocrText.trim().length === 0) {
     dynamicVerdict = "OCR 인식 실패";
-  } else if (confirmedExactMatches.length >= 1) {
+  } else if (matchedRowsCount > 0 && matchedRowsCount === tableRows.length) {
     dynamicVerdict = "일치";
-  } else if (confirmedSimilarMatches.length >= 1) {
+  } else if (matchedRowsCount > 0) {
     dynamicVerdict = "확인 필요";
   } else {
     dynamicVerdict = "불일치";
   }
+
+  // Handle status toggle from the table
+  const handleToggleRowStatus = (modelName: string) => {
+    // Find in exact matches
+    const exact = matchResult.exactMatches.find((m) => m.reference.model === modelName);
+    if (exact) {
+      const key = `${exact.reference.sheetName}-${exact.reference.rowNumber}-${exact.reference.model}`;
+      handleToggleExact(key);
+      return;
+    }
+    // Find in similar matches
+    const similar = matchResult.similarMatches.find((m) => m.reference.model === modelName);
+    if (similar) {
+      const key = `${similar.reference.sheetName}-${similar.reference.rowNumber}-${similar.reference.model}-${similar.ocrCandidate}`;
+      handleToggleSimilar(key);
+    }
+  };
 
   // Submit Final Confirmation
   const handleConfirmSubmit = () => {
@@ -125,22 +201,23 @@ export const OcrRecognitionReview: React.FC<OcrRecognitionReviewProps> = ({
       confirmedExactMatches,
       confirmedSimilarMatches,
       matchResult.unmatchedCandidates,
-      dynamicVerdict
+      dynamicVerdict,
+      tableRows
     );
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-5 my-4 px-2 sm:px-0">
+    <div className="max-w-5xl mx-auto space-y-4 my-4 px-2 sm:px-0">
       {/* Top Banner Notice */}
-      <div className="bg-teal-900 text-white p-5 rounded-2xl shadow-lg border border-teal-800 space-y-3">
+      <div className="bg-teal-900 text-white p-4 sm:p-5 rounded-2xl shadow-lg border border-teal-800 space-y-3">
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-5 h-5 text-teal-300" />
+              <CheckCircle2 className="w-5 h-5 text-teal-300 shrink-0" />
               <h2 className="text-base sm:text-lg font-bold">OCR 인식 확인</h2>
             </div>
             <p className="text-xs text-teal-200 mt-1">
-              선택 영역에서 다음 모델 후보를 확인했습니다. 확인 후 [검수 결과 확정]을 눌러주세요.
+              인식된 기준데이터 항목과 일치 여부를 확인 후 [검수 결과 확정]을 눌러주세요.
             </p>
           </div>
 
@@ -157,314 +234,111 @@ export const OcrRecognitionReview: React.FC<OcrRecognitionReviewProps> = ({
           </span>
         </div>
 
-        {/* Cropped Image & Inspection Meta Row */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-teal-800/80 text-xs">
+        {/* Cropped Image Thumbnail & Meta */}
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-2 border-t border-teal-800/80 text-xs items-center">
           {croppedDataUrl && (
-            <div className="sm:col-span-1 bg-slate-950/60 p-2 rounded-xl border border-teal-800 flex items-center justify-center">
+            <div
+              onClick={() => setIsImageModalOpen(true)}
+              className="sm:col-span-1 bg-slate-950/80 p-1.5 rounded-xl border border-teal-700/80 flex items-center justify-center cursor-pointer group hover:border-teal-400 transition-all relative overflow-hidden"
+              title="클릭하여 선택 영역 크게 보기"
+            >
               <img
                 src={croppedDataUrl}
-                alt="선택 크롭 이미지"
-                className="max-h-20 object-contain rounded"
+                alt="OCR 선택 영역"
+                className="max-h-16 object-contain rounded"
               />
+              <div className="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 flex items-center justify-center gap-1 text-white text-[11px] font-bold transition-opacity">
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span>확대</span>
+              </div>
             </div>
           )}
 
-          <div className="sm:col-span-2 space-y-1 text-teal-200 flex flex-col justify-center">
+          <div
+            className={`${
+              croppedDataUrl ? "sm:col-span-3" : "sm:col-span-4"
+            } space-y-1 text-teal-200 flex flex-col justify-center`}
+          >
             {vendor && (
               <div className="flex items-center gap-1.5">
-                <Building className="w-3.5 h-3.5 text-teal-400" />
-                <span>거래처: <strong className="text-white">{vendor}</strong></span>
-              </div>
-            )}
-            {surgeryDate && (
-              <div className="flex items-center gap-1.5">
-                <Calendar className="w-3.5 h-3.5 text-teal-400" />
-                <span>수술일: <strong className="text-white">{surgeryDate}</strong></span>
+                <Building className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                <span>
+                  업체명: <strong className="text-white">{vendor}</strong>
+                </span>
               </div>
             )}
             {memo && (
               <div className="flex items-center gap-1.5">
-                <FileText className="w-3.5 h-3.5 text-teal-400" />
-                <span>메모: <span className="text-teal-100">{memo}</span></span>
+                <FileText className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                <span>
+                  메모: <span className="text-teal-100">{memo}</span>
+                </span>
               </div>
             )}
           </div>
         </div>
       </div>
 
-      {/* Summary Counts Bar */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 text-center shadow-2xs">
-          <span className="text-[11px] font-bold text-slate-500 block">OCR 후보 수</span>
-          <span className="text-xl font-extrabold text-slate-900 mt-0.5 block">
-            {matchResult.exactMatches.length +
-              matchResult.similarMatches.length +
-              matchResult.unmatchedCandidates.length}
-          </span>
-        </div>
+      {/* Main Inspection Result Table (Excel Data Table View) */}
+      <InspectionResultTable
+        rows={tableRows}
+        onToggleStatus={handleToggleRowStatus}
+        isInteractive={true}
+        title="OCR 인식 및 기준데이터 매칭 결과"
+        showSheetColumn={true}
+      />
 
-        <div className="bg-emerald-50 p-3.5 rounded-2xl border border-emerald-200 text-center shadow-2xs">
-          <span className="text-[11px] font-bold text-emerald-800 block">정확 일치 모델</span>
-          <span className="text-xl font-extrabold text-emerald-900 mt-0.5 block">
-            {matchResult.exactMatches.length}건
-          </span>
-        </div>
-
-        <div className="bg-amber-50 p-3.5 rounded-2xl border border-amber-200 text-center shadow-2xs">
-          <span className="text-[11px] font-bold text-amber-800 block">유사 후보</span>
-          <span className="text-xl font-extrabold text-amber-900 mt-0.5 block">
-            {matchResult.similarMatches.length}건
-          </span>
-        </div>
-
-        <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200 text-center shadow-2xs">
-          <span className="text-[11px] font-bold text-slate-500 block">기타 OCR 문자열</span>
-          <span className="text-xl font-extrabold text-slate-700 mt-0.5 block">
-            {matchResult.unmatchedCandidates.length}건
-          </span>
-        </div>
-      </div>
-
-      {/* SECTION 1: Exact Matches */}
-      <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
-        <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-          <div>
-            <h3 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
-              <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-              정확 일치 모델 ({matchResult.exactMatches.length}건)
-            </h3>
-            <p className="text-xs text-slate-500 mt-0.5">
-              전체 기준데이터의 모델 코드와 정확히 일치하는 항목입니다.
-            </p>
-          </div>
-        </div>
-
-        {matchResult.exactMatches.length === 0 ? (
-          <div className="p-6 bg-slate-50 rounded-xl text-center text-xs text-slate-500">
-            OCR 영역에서 정확히 일치하는 기준 모델을 찾지 못했습니다.
-          </div>
-        ) : (
-          <div className="space-y-2.5">
-            {matchResult.exactMatches.map((item, idx) => {
-              const key = `${item.reference.sheetName}-${item.reference.rowNumber}-${item.reference.model}`;
-              const isChecked = selectedExactKeys.has(key);
-
-              return (
-                <div
-                  key={idx}
-                  onClick={() => handleToggleExact(key)}
-                  className={`p-3.5 rounded-xl border transition-all cursor-pointer select-none space-y-2 ${
-                    isChecked
-                      ? "bg-emerald-50/80 border-emerald-300 shadow-xs"
-                      : "bg-slate-50/50 border-slate-200 opacity-60"
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2.5">
-                      <div className="text-teal-600 shrink-0">
-                        {isChecked ? (
-                          <CheckSquare className="w-5 h-5 text-emerald-600" />
-                        ) : (
-                          <Square className="w-5 h-5 text-slate-300" />
-                        )}
-                      </div>
-
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono font-bold text-sm text-slate-900">
-                            {item.reference.model}
-                          </span>
-                          <span className="text-[11px] font-bold px-2 py-0.5 bg-teal-100 text-teal-800 rounded-md border border-teal-200">
-                            제품군: {item.reference.sheetName}
-                          </span>
-                        </div>
-                        <h4 className="font-bold text-xs text-slate-800 mt-1">
-                          {item.reference.itemName || "물품명 없음"}
-                        </h4>
-                      </div>
-                    </div>
-
-                    <span className="px-2.5 py-1 bg-emerald-600 text-white text-[11px] font-bold rounded-lg shrink-0">
-                      정확 일치
-                    </span>
-                  </div>
-
-                  {/* Detail details row */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-slate-600 pt-2 border-t border-emerald-100/80">
-                    <div>
-                      <span className="text-slate-400 block">규격:</span>
-                      <span className="font-semibold">{item.reference.specification || "-"}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block">물품코드:</span>
-                      <span className="font-mono font-semibold">{item.reference.itemCode || "-"}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block">제조사:</span>
-                      <span>{item.reference.manufacturer || "-"}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block">EDI 코드:</span>
-                      <span className="font-mono">{item.reference.ediCode || "-"}</span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* SECTION 2: Similar Matches */}
+      {/* Similar Candidate Clarification Hint Section if any */}
       {matchResult.similarMatches.length > 0 && (
-        <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-            <div>
-              <h3 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-amber-600" />
-                유사 일치 후보 ({matchResult.similarMatches.length}건)
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                OCR 오인식 가능성이 있는 유사 항목입니다. 포함할 경우 체크해 주세요. (자동 확정 안 됨)
-              </p>
-            </div>
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2 text-xs">
+          <div className="flex items-center gap-2 text-amber-900 font-bold">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>유사 후보 알림 ({matchResult.similarMatches.length}건)</span>
           </div>
-
-          <div className="space-y-2.5">
-            {matchResult.similarMatches.map((item, idx) => {
-              const key = `${item.reference.sheetName}-${item.reference.rowNumber}-${item.reference.model}-${item.ocrCandidate}`;
-              const isChecked = selectedSimilarKeys.has(key);
-
-              // Suggest character confusion hint
-              let note = `OCR 오독 가능성 (문자 거리: ${item.distance})`;
-              if (item.ocrCandidate.includes("O") && item.reference.model.includes("0")) {
-                note = "OCR이 숫자 '0'을 알파벳 'O'로 오독했을 수 있습니다.";
-              } else if (item.ocrCandidate.includes("I") && item.reference.model.includes("1")) {
-                note = "OCR이 숫자 '1'을 알파벳 'I'로 오독했을 수 있습니다.";
-              }
-
-              return (
-                <div
-                  key={idx}
-                  onClick={() => handleToggleSimilar(key)}
-                  className={`p-3.5 rounded-xl border transition-all cursor-pointer select-none space-y-2 ${
-                    isChecked
-                      ? "bg-amber-50 border-amber-300 shadow-xs"
-                      : "bg-slate-50 border-slate-200"
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2.5">
-                      <div className="shrink-0">
-                        {isChecked ? (
-                          <CheckSquare className="w-5 h-5 text-amber-600" />
-                        ) : (
-                          <Square className="w-5 h-5 text-slate-300" />
-                        )}
-                      </div>
-
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-xs text-slate-500 line-through">
-                            OCR: {item.ocrCandidate}
-                          </span>
-                          <span className="text-xs text-slate-400">→</span>
-                          <span className="font-mono font-bold text-sm text-amber-900">
-                            기준: {item.reference.model}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-amber-800 font-semibold mt-0.5 flex items-center gap-1">
-                          <Info className="w-3 h-3 text-amber-600 shrink-0" />
-                          <span>{note}</span>
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="text-right shrink-0">
-                      <span className="px-2.5 py-1 bg-amber-100 text-amber-800 border border-amber-300 text-[11px] font-bold rounded-lg block">
-                        유사 후보
-                      </span>
-                      <span className="text-[10px] text-slate-500 font-semibold block mt-1">
-                        제품군: {item.reference.sheetName}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px] text-slate-600 pt-2 border-t border-amber-100">
-                    <div>
-                      <span className="text-slate-400 block">물품명:</span>
-                      <span className="font-medium text-slate-800">{item.reference.itemName || "-"}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block">규격:</span>
-                      <span className="font-medium">{item.reference.specification || "-"}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block">물품코드:</span>
-                      <span className="font-mono">{item.reference.itemCode || "-"}</span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* SECTION 3: Unmatched Candidates (Collapsible) */}
-      {matchResult.unmatchedCandidates.length > 0 && (
-        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-2xs">
-          <button
-            onClick={() => setIsUnmatchedOpen(!isUnmatchedOpen)}
-            className="w-full p-4 bg-slate-50 hover:bg-slate-100 transition-colors flex items-center justify-between text-left"
-          >
-            <div className="flex items-center gap-2">
-              <Tag className="w-4 h-4 text-slate-500" />
-              <h3 className="text-xs sm:text-sm font-bold text-slate-700">
-                기준 모델과 일치하지 않은 OCR 문자열 ({matchResult.unmatchedCandidates.length}건)
-              </h3>
-            </div>
-            <div className="flex items-center gap-1 text-slate-400 text-xs">
-              <span>{isUnmatchedOpen ? "접기" : "펼치기"}</span>
-              {isUnmatchedOpen ? (
-                <ChevronUp className="w-4 h-4" />
-              ) : (
-                <ChevronDown className="w-4 h-4" />
-              )}
-            </div>
-          </button>
-
-          {isUnmatchedOpen && (
-            <div className="p-4 border-t border-slate-200 space-y-2 bg-white">
-              <p className="text-[11px] text-slate-500">
-                Lot No, Serial No, 유효기간, 숫자 수량 등 기준 모델에 등록되지 않은 보조 문자열입니다.
-              </p>
-              <div className="flex flex-wrap gap-1.5 pt-1">
-                {matchResult.unmatchedCandidates.map((cand, idx) => (
-                  <span
-                    key={idx}
-                    className="px-2.5 py-1 bg-slate-100 text-slate-600 rounded-lg text-xs font-mono border border-slate-200"
-                  >
-                    {cand}
+          <p className="text-amber-800">
+            문자 유사도(0 ↔ O, 1 ↔ I 등)에 따라 감지된 후보입니다. 위 표에서 상태를 클릭하여 [일치/불일치]를 직접 변경할 수 있습니다.
+          </p>
+          <div className="space-y-1.5 pt-1">
+            {matchResult.similarMatches.map((sim, idx) => (
+              <div
+                key={idx}
+                className="bg-white/80 p-2 rounded-xl border border-amber-200 flex flex-wrap items-center justify-between gap-2"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-slate-500 line-through">
+                    OCR 인식: {sim.ocrCandidate}
                   </span>
-                ))}
+                  <span className="text-slate-400">→</span>
+                  <span className="font-mono font-bold text-amber-900">
+                    기준 모델: {sim.reference.model} ({sim.reference.sheetName})
+                  </span>
+                </div>
+                <span className="text-[11px] text-slate-600">
+                  {sim.reference.itemName}
+                </span>
               </div>
-            </div>
-          )}
+            ))}
+          </div>
         </div>
       )}
 
-      {/* SECTION 4: Raw OCR Text (Collapsible Debug) */}
+      {/* OCR Raw Text Accordion (Clean and minimal) */}
       <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-2xs">
         <button
+          type="button"
           onClick={() => setIsRawTextOpen(!isRawTextOpen)}
-          className="w-full p-3.5 bg-slate-50 hover:bg-slate-100 transition-colors flex items-center justify-between text-left"
+          className="w-full p-3.5 bg-slate-50 hover:bg-slate-100 transition-colors flex items-center justify-between text-left cursor-pointer"
         >
-          <span className="text-xs font-bold text-slate-600">
-            OCR 전체 추출 원문 보기 (원문 {ocrText?.length || 0}자)
+          <span className="text-xs font-bold text-slate-700">
+            OCR 전체 추출 텍스트 원문 ({ocrText?.length || 0}자)
           </span>
           <div className="flex items-center gap-1 text-slate-400 text-xs">
-            {isRawTextOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            <span>{isRawTextOpen ? "접기" : "원문 보기"}</span>
+            {isRawTextOpen ? (
+              <ChevronUp className="w-4 h-4" />
+            ) : (
+              <ChevronDown className="w-4 h-4" />
+            )}
           </div>
         </button>
 
@@ -478,21 +352,31 @@ export const OcrRecognitionReview: React.FC<OcrRecognitionReviewProps> = ({
       {/* Main Action Bar */}
       <div className="pt-3 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
         <button
+          type="button"
           onClick={onRetakeOrRecrop}
-          className="w-full sm:w-auto px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs sm:text-sm rounded-xl transition-colors flex items-center justify-center gap-2"
+          className="w-full sm:w-auto px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs sm:text-sm rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer"
         >
           <RotateCcw className="w-4 h-4" />
-          <span>영역 다시 선택 / 촬영</span>
+          <span>영역 다시 선택 / 재촬영</span>
         </button>
 
         <button
+          type="button"
           onClick={handleConfirmSubmit}
-          className="w-full sm:w-auto px-7 py-3 bg-teal-600 hover:bg-teal-500 text-white font-bold text-sm rounded-xl shadow-md shadow-teal-900/20 transition-all flex items-center justify-center gap-2"
+          className="w-full sm:w-auto px-7 py-3 bg-teal-600 hover:bg-teal-500 text-white font-bold text-sm rounded-xl shadow-md shadow-teal-900/20 transition-all flex items-center justify-center gap-2 cursor-pointer"
         >
           <Check className="w-5 h-5" />
-          <span>검수 결과 확정 ({totalConfirmed}개 모델 확정)</span>
+          <span>검수 결과 확정 ({matchedRowsCount}건 일치)</span>
         </button>
       </div>
+
+      {/* Enlarged Crop Image Modal */}
+      {isImageModalOpen && croppedDataUrl && (
+        <OcrCropImageModal
+          imageUrl={croppedDataUrl}
+          onClose={() => setIsImageModalOpen(false)}
+        />
+      )}
     </div>
   );
 };

@@ -72,23 +72,33 @@ export interface OcrApiResponse {
 export interface SaveInspectionPayload {
   action?: "saveInspection";
   vendor: string;
-  surgeryDate: string;
+  surgeryDate?: string;
   memo: string;
   verdict: InspectionVerdict;
   ocrText: string;
-  exactMatches: Array<{
+  inspectionRows: InspectionTableRow[];
+  sheetName?: string;
+  matched?: string[];
+  missing?: string[];
+  extra?: string[];
+  matchedCount?: number;
+  missingCount?: number;
+  extraCount?: number;
+  referenceCount?: number;
+  totalCount?: number;
+  exactMatches?: Array<{
     sheetName: string;
     model: string;
     itemCode?: string;
     itemName?: string;
     specification?: string;
   }>;
-  similarMatches: Array<{
+  similarMatches?: Array<{
     sheetName: string;
     model: string;
     ocrCandidate: string;
   }>;
-  unmatchedCandidates: string[];
+  unmatchedCandidates?: string[];
 }
 
 export interface SaveInspectionResponse {
@@ -122,6 +132,7 @@ export interface InspectionResult {
   textLength: number;
   historyId: string;
   inspectedAt: string;
+  inspectionRows?: InspectionTableRow[];
   exactMatches?: ExactModelMatch[];
   similarMatches?: SimilarModelMatch[];
   unmatchedCandidates?: string[];
@@ -133,7 +144,7 @@ export interface HistoryItem {
   timestamp: string;
   vendor: string;
   sheetName: string;
-  surgeryDate: string;
+  surgeryDate?: string;
   verdict: InspectionVerdict;
   referenceCount: number;
   matchedCount: number;
@@ -145,6 +156,7 @@ export interface HistoryItem {
   ocrText: string;
   textLength: number;
   memo: string;
+  inspectionRows?: InspectionTableRow[];
 }
 
 export interface HealthCheckResponse {
@@ -221,4 +233,32 @@ export interface EditableOcrCode {
   normalizedValue: string;
   selected: boolean;
   status: CodeStatus;
+}
+
+export type MatchStatus = "matched" | "unmatched";
+
+export const MATCH_STATUS_LABEL: Record<MatchStatus, string> = {
+  matched: "일치",
+  unmatched: "불일치",
+};
+
+export const RESULT_LABELS = {
+  total: "총 검수 항목",
+  matched: "일치 항목",
+  unmatched: "불일치 항목",
+  exactMatch: "일치",
+  mismatch: "불일치",
+  review: "검수 결과 확인",
+} as const;
+
+export interface InspectionTableRow {
+  sheetName: string;
+  model: string;
+  itemName: string;
+  specification: string;
+  itemCode: string;
+  manufacturer: string;
+  ediCode: string;
+  vendor?: string;
+  status: MatchStatus;
 }
