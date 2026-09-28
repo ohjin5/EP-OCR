@@ -117,60 +117,30 @@ export const OcrRecognitionReview: React.FC<OcrRecognitionReviewProps> = ({
     });
   }, [matchResult.similarMatches, selectedSimilarKeys]);
 
-  // Build unified InspectionTableRow[] for target items identified in this session
+  // State for row status overrides (model -> status)
+  const [rowStatusOverrides, setRowStatusOverrides] = useState<Record<string, "matched" | "unmatched">>({});
+
+  // Build unified InspectionTableRow[] directly from matchResult.tableRows with user overrides applied
   const tableRows: InspectionTableRow[] = useMemo(() => {
-    const rows: InspectionTableRow[] = [];
-
-    // 1. Exact Matches
-    matchResult.exactMatches.forEach((m) => {
-      const key = `${m.reference.sheetName}-${m.reference.rowNumber}-${m.reference.model}`;
-      const isSelected = selectedExactKeys.has(key);
-      rows.push({
-        sheetName: m.reference.sheetName,
-        model: m.reference.model,
-        itemName: m.reference.itemName || "-",
-        specification: m.reference.specification || "-",
-        itemCode: m.reference.itemCode || "-",
-        manufacturer: m.reference.manufacturer || "-",
-        ediCode: m.reference.ediCode || "-",
-        vendor: m.reference.vendor || vendor || "-",
-        status: isSelected ? "matched" : "unmatched",
-      });
+    return (matchResult.tableRows || []).map((row) => {
+      const override = rowStatusOverrides[row.model];
+      return {
+        ...row,
+        vendor: row.vendor || vendor || "-",
+        status: override ?? row.status,
+      };
     });
-
-    // 2. Similar Matches
-    matchResult.similarMatches.forEach((m) => {
-      const key = `${m.reference.sheetName}-${m.reference.rowNumber}-${m.reference.model}-${m.ocrCandidate}`;
-      const isSelected = selectedSimilarKeys.has(key);
-      rows.push({
-        sheetName: m.reference.sheetName,
-        model: m.reference.model,
-        itemName: m.reference.itemName || "-",
-        specification: m.reference.specification || "-",
-        itemCode: m.reference.itemCode || "-",
-        manufacturer: m.reference.manufacturer || "-",
-        ediCode: m.reference.ediCode || "-",
-        vendor: m.reference.vendor || vendor || "-",
-        status: isSelected ? "matched" : "unmatched",
-      });
-    });
-
-    return rows;
-  }, [
-    matchResult.exactMatches,
-    matchResult.similarMatches,
-    selectedExactKeys,
-    selectedSimilarKeys,
-    vendor,
-  ]);
+  }, [matchResult.tableRows, rowStatusOverrides, vendor]);
 
   // Calculate dynamic overall verdict
   const matchedRowsCount = tableRows.filter((r) => r.status === "matched").length;
+  const unmatchedRowsCount = tableRows.filter((r) => r.status === "unmatched").length;
+
   let dynamicVerdict: InspectionVerdict = "불일치";
 
   if (!ocrText || ocrText.trim().length === 0) {
     dynamicVerdict = "OCR 인식 실패";
-  } else if (matchedRowsCount > 0 && matchedRowsCount === tableRows.length) {
+  } else if (matchedRowsCount > 0 && unmatchedRowsCount === 0) {
     dynamicVerdict = "일치";
   } else if (matchedRowsCount > 0) {
     dynamicVerdict = "확인 필요";
@@ -180,19 +150,13 @@ export const OcrRecognitionReview: React.FC<OcrRecognitionReviewProps> = ({
 
   // Handle status toggle from the table
   const handleToggleRowStatus = (modelName: string) => {
-    // Find in exact matches
-    const exact = matchResult.exactMatches.find((m) => m.reference.model === modelName);
-    if (exact) {
-      const key = `${exact.reference.sheetName}-${exact.reference.rowNumber}-${exact.reference.model}`;
-      handleToggleExact(key);
-      return;
-    }
-    // Find in similar matches
-    const similar = matchResult.similarMatches.find((m) => m.reference.model === modelName);
-    if (similar) {
-      const key = `${similar.reference.sheetName}-${similar.reference.rowNumber}-${similar.reference.model}-${similar.ocrCandidate}`;
-      handleToggleSimilar(key);
-    }
+    setRowStatusOverrides((prev) => {
+      const current = prev[modelName] || tableRows.find((r) => r.model === modelName)?.status || "matched";
+      return {
+        ...prev,
+        [modelName]: current === "matched" ? "unmatched" : "matched",
+      };
+    });
   };
 
   // Submit Final Confirmation
@@ -278,6 +242,55 @@ export const OcrRecognitionReview: React.FC<OcrRecognitionReviewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Top Summary Metrics Cards (4 Metrics) */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-4">
+        <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 shadow-2xs">
+          <span className="text-xs text-slate-500 font-bold block">
+            추출 코드 (원문)
+          </span>
+          <span className="text-xl sm:text-2xl font-extrabold font-mono text-slate-800 mt-1 block">
+            {matchResult.rawCandidateCount || tableRows.length}
+          </span>
+        </div>
+
+        <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 shadow-2xs">
+          <span className="text-xs text-slate-500 font-bold block">
+            검수 대상 (중복제거)
+          </span>
+          <span className="text-xl sm:text-2xl font-extrabold font-mono text-slate-800 mt-1 block">
+            {matchResult.deduplicatedCandidateCount || tableRows.length}
+          </span>
+        </div>
+
+        <div className="bg-emerald-50/80 p-3.5 sm:p-4 rounded-2xl border border-emerald-200 shadow-2xs">
+          <span className="text-xs text-emerald-800 font-bold block">
+            일치 항목
+          </span>
+          <span className="text-xl sm:text-2xl font-extrabold font-mono text-emerald-900 mt-1 block">
+            {matchedRowsCount}
+          </span>
+        </div>
+
+        <div className="bg-rose-50/80 p-3.5 sm:p-4 rounded-2xl border border-rose-200 shadow-2xs">
+          <span className="text-xs text-rose-800 font-bold block">
+            미등록 (불일치)
+          </span>
+          <span className="text-xl sm:text-2xl font-extrabold font-mono text-rose-900 mt-1 block">
+            {unmatchedRowsCount}
+          </span>
+        </div>
+      </div>
+
+      {/* Duplicate Warning Banner if duplicates were auto-removed */}
+      {matchResult.removedDuplicateCount > 0 && (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-3.5 flex items-center gap-2.5 text-xs text-amber-900 font-medium shadow-2xs">
+          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>
+            OCR 추출 과정에서 동일 코드 <strong>{matchResult.removedDuplicateCount}건</strong>이 자동 중복 제거되었습니다.
+          </span>
+        </div>
+      )}
 
       {/* Main Inspection Result Table (Excel Data Table View) */}
       <InspectionResultTable

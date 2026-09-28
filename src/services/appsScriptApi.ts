@@ -90,6 +90,37 @@ export async function getProductGroups(): Promise<ProductGroup[]> {
 }
 
 /**
+ * Normalize raw reference row object from Apps Script to ensure manufacturer
+ * and other fields are mapped from any possible header aliases.
+ */
+export function normalizeReferenceRow(row: any): ReferenceModel {
+  const mfr =
+    row.manufacturer ||
+    row.mfr ||
+    row.mfrName ||
+    row["제조사"] ||
+    row["제조업체"] ||
+    row["제조원"] ||
+    row["Manufacturer"] ||
+    row["MFR"] ||
+    row["MFR_NAME"] ||
+    row["mfr_name"] ||
+    "-";
+
+  return {
+    sheetName: row.sheetName || "",
+    rowNumber: Number(row.rowNumber) || 0,
+    model: row.model || row["모델"] || row["모델명"] || "",
+    itemCode: row.itemCode || row["물품코드"] || row["품목코드"] || "-",
+    itemName: row.itemName || row["물품명"] || row["품목명"] || "-",
+    specification: row.specification || row["규격"] || "-",
+    manufacturer: String(mfr).trim() || "-",
+    ediCode: row.ediCode || row["EDI코드"] || row["EDI 코드"] || "-",
+    vendor: row.vendor || row["업체명"] || "-",
+  };
+}
+
+/**
  * 3. Get ALL Reference Rows Across All Sheets
  * Action: GET ?action=allReferenceRows
  */
@@ -102,9 +133,11 @@ export async function getAllReferenceRows(): Promise<{
   if (!res.success) {
     throw new Error(res.message || "전체 기준 데이터를 불러오지 못했습니다.");
   }
+  const rawRows = res.rows || [];
+  const normalizedRows = rawRows.map((r) => normalizeReferenceRow(r));
   return {
-    total: res.total || res.rows?.length || 0,
-    rows: res.rows || [],
+    total: res.total || normalizedRows.length,
+    rows: normalizedRows,
   };
 }
 

@@ -36,6 +36,12 @@ export interface IndexedReferenceModel extends ReferenceModel {
   normalizedModel: string;
 }
 
+export interface OcrCodeCandidate {
+  raw: string;
+  normalized: string;
+  lineNumber?: number;
+}
+
 export interface ExactModelMatch {
   type: "exact";
   ocrCandidate: string;
@@ -50,9 +56,13 @@ export interface SimilarModelMatch {
 }
 
 export interface ModelMatchingResult {
+  rawCandidateCount: number;
+  deduplicatedCandidateCount: number;
+  removedDuplicateCount: number;
   exactMatches: ExactModelMatch[];
   similarMatches: SimilarModelMatch[];
   unmatchedCandidates: string[];
+  tableRows: InspectionTableRow[];
 }
 
 export interface AllReferenceRowsResponse {
@@ -137,6 +147,9 @@ export interface InspectionResult {
   similarMatches?: SimilarModelMatch[];
   unmatchedCandidates?: string[];
   candidateCount?: number;
+  rawCandidateCount?: number;
+  deduplicatedCandidateCount?: number;
+  removedDuplicateCount?: number;
 }
 
 export interface HistoryItem {
